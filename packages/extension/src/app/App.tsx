@@ -14,6 +14,7 @@ import {
 } from './documents'
 import appIcon from '../../assets/icon-48.png'
 import typechoIcon from '../../assets/typecho.ico'
+import { McpPanel } from './McpPanel'
 import { CmsForm, DocEditor, DocTabs, PlatformList, ResultList, UploadArea, type DocResult, type PlatformRow } from './components'
 
 type Mode = 'draft' | 'publish'
@@ -354,6 +355,7 @@ export default function App() {
               </p>
             )}
           </div>
+          <McpPanel />
         </aside>
       </div>
     </div>

@@ -20,6 +20,11 @@
       "types": "./src/runtime/index.ts",
       "import": "./src/runtime/index.ts",
       "require": "./src/runtime/index.ts"
+    },
+    "./markdown": {
+      "types": "./src/lib/markdown-document.ts",
+      "import": "./src/lib/markdown-document.ts",
+      "require": "./src/lib/markdown-document.ts"
     }
   },
   "scripts": {

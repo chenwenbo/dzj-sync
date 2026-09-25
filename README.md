@@ -7,6 +7,7 @@
 - 使用浏览器中已登录的账号，不需要输入各平台密码，不经过任何第三方服务器
 - 支持 frontmatter、本地图片、多篇文档批量同步
 - 支持「保存草稿」和「直接发布」两种模式
+- 支持 AI 工作流：命令行 CLI、MCP Server（Claude Code / Claude Desktop 等）、Claude Skill
 
 ## 使用方法
 
@@ -56,13 +57,64 @@ cover: ./images/cover.png  # 图片 URL 或本地相对路径
 
 > 各平台的发布接口来自其网页编辑器，平台改版后可能失效。建议先用「保存草稿」确认排版，再使用直接发布。
 
+## AI 能力：CLI / MCP / Skill
+
+扩展页面右侧的「AI 连接」开启后，扩展会连接本地的 `ws://localhost:9527`，CLI 和 MCP Server 通过它同步文章。
+请求需要携带 Token（在「AI 连接」中复制，配置为环境变量 `WECHATSYNC_TOKEN`），所有数据只在本机传输。
+
+```
+Claude / 终端 ──> MCP Server 或 CLI ──WebSocket(9527)──> Chrome 扩展 ──> 各平台（使用浏览器登录态）
+```
+
+### CLI
+
+```bash
+pnpm build && cd packages/cli && npm link      # 安装 wechatsync 命令
+export WECHATSYNC_TOKEN="扩展中复制的 token"
+
+wechatsync platforms --auth                          # 登录状态，「可发布」表示支持直接发布
+wechatsync sync post.md -p juejin,csdn               # 保存草稿
+wechatsync sync post.md -p juejin,csdn --publish     # 直接发布（会二次确认，-y 跳过）
+wechatsync sync post.md -p juejin --tags "JavaScript,前端" --category 前端 --publish -y
+wechatsync sync post.md -p juejin --dry-run          # 只预览，不同步
+```
+
+本地图片、frontmatter 与页面上传一致；自建站使用 `wechatsync platforms` 显示的 id（如 `cms_1712345678`）。
+
+### MCP Server
+
+```bash
+claude mcp add wechatsync -e WECHATSYNC_TOKEN="你的 token" -- node /path/to/dzj-sync/packages/mcp-server/dist/index.js
+```
+
+提供的工具：
+
+| 工具 | 说明 |
+|-----|-----|
+| `list_platforms` | 平台与自建站列表、登录状态、是否支持直接发布（`canPublish`） |
+| `check_auth` | 检查单个平台登录状态 |
+| `sync_markdown_file` | 同步本地 Markdown / HTML 文件（推荐，自动处理 frontmatter 和本地图片） |
+| `sync_article` | 同步传入的 Markdown / HTML 内容 |
+| `upload_image_file` | 上传本地图片到指定平台图床 |
+
+同步类工具默认保存草稿，传 `publish: true` 才直接发布；还支持 `title`、`tags`、`category`、`summary`、`cover` 参数。详见 [packages/mcp-server/README.md](packages/mcp-server/README.md)。
+
+### Claude Skill
+
+[`skills/wechatsync/SKILL.md`](skills/wechatsync/SKILL.md) 让 Claude 通过 CLI 完成同步。仓库根目录带有 `.claude-plugin`，可作为 Claude Code 插件安装：
+
+```bash
+claude plugin marketplace add chenwenbo/dzj-sync
+claude plugin install sync@dzj-sync
+```
+
 ## 构建与安装
 
 需要 Node.js 20+ 和 pnpm。
 
 ```bash
 pnpm install
-pnpm build
+pnpm build        # 构建扩展、MCP Server 和 CLI
 ```
 
 在 Chrome（或 Edge 等 Chromium 内核浏览器）打开 `chrome://extensions`，开启「开发者模式」，点击「加载已解压的扩展程序」，选择 `packages/extension/dist`。
@@ -80,18 +132,23 @@ pnpm typecheck   # 类型检查
 ```
 packages/
 ├── core/        # Markdown 解析、平台适配器（adapters/platforms/*）、运行时接口
-└── extension/   # Chrome 扩展
-    └── src/
-        ├── app/         # 同步页面（上传、预览、选择平台、结果）
-        ├── background/  # Service Worker：登录检查、执行同步
-        └── adapters/    # 适配器注册、自建站（WordPress / Typecho / MetaWeblog）
+├── extension/   # Chrome 扩展
+│   └── src/
+│       ├── app/         # 同步页面（上传、预览、选择平台、结果、AI 连接设置）
+│       ├── background/  # Service Worker：登录检查、执行同步
+│       ├── offscreen/   # 为 MCP / CLI 请求提供 DOM（Markdown 渲染与按平台预处理）
+│       ├── mcp/         # 与 MCP Server / CLI 的 WebSocket 连接
+│       └── adapters/    # 适配器注册、自建站（WordPress / Typecho / MetaWeblog）
+├── mcp-server/  # MCP Server（stdio / SSE）
+└── cli/         # wechatsync 命令行
+skills/          # Claude Skill
 ```
 
 新增或修复平台请参考 [docs/adapter-spec.md](docs/adapter-spec.md)。
 
 ## 相比原项目移除的功能
 
-网页文章提取、公众号 / 头条页面内按钮、在线编辑器、悬浮按钮、同步历史、CLI、MCP Server、Claude Skill、数据统计、远程配置、版本检查、Markdown ZIP 下载、私有适配器子模块。
+网页文章提取（含 CLI `extract` / MCP `extract_article`）、公众号 / 头条页面内按钮、在线编辑器、悬浮按钮、同步历史、数据统计、远程配置、版本检查、Markdown ZIP 下载、私有适配器子模块。
 
 ## License
 

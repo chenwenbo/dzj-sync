@@ -25,6 +25,7 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         input: {
           app: resolve(__dirname, 'src/app/index.html'),
+          offscreen: resolve(__dirname, 'src/offscreen/index.html'),
         },
       },
     },

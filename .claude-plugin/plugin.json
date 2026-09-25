@@ -1,0 +1,25 @@
+{
+  "name": "sync",
+  "version": "2.0.0",
+  "description": "Sync or directly publish Markdown articles to Juejin, CSDN, Zhihu, Cnblogs, Yuque, WordPress, Typecho and more",
+  "author": {
+    "name": "chenwenbo",
+    "url": "https://github.com/chenwenbo"
+  },
+  "homepage": "https://github.com/chenwenbo/dzj-sync",
+  "repository": "https://github.com/chenwenbo/dzj-sync",
+  "license": "MIT",
+  "keywords": [
+    "sync",
+    "publish",
+    "markdown",
+    "juejin",
+    "csdn",
+    "zhihu",
+    "cnblogs",
+    "wordpress"
+  ],
+  "skills": [
+    "./skills/"
+  ]
+}

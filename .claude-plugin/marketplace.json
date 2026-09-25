@@ -1,0 +1,19 @@
+{
+  "name": "dzj-sync",
+  "owner": {
+    "name": "chenwenbo",
+    "url": "https://github.com/chenwenbo"
+  },
+  "plugins": [
+    {
+      "name": "sync",
+      "source": "./",
+      "version": "2.0.0",
+      "description": "Sync or directly publish Markdown articles to Juejin, CSDN, Zhihu, Cnblogs, Yuque, WordPress, Typecho and more",
+      "author": {
+        "name": "chenwenbo",
+        "url": "https://github.com/chenwenbo"
+      }
+    }
+  ]
+}

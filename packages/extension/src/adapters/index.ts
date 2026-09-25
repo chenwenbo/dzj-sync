@@ -150,6 +150,19 @@ export async function checkAllPlatformsAuth(): Promise<PlatformStatus[]> {
 }
 
 /**
+ * 检查单个平台登录状态
+ */
+export async function checkPlatformAuth(platformId: string) {
+  const adapter = await getAdapter(platformId)
+  if (!adapter) return { isAuthenticated: false, error: 'Platform not found' }
+  try {
+    return await withTimeout(adapter.checkAuth(), AUTH_CHECK_TIMEOUT, '登录检查超时')
+  } catch (error) {
+    return { isAuthenticated: false, error: (error as Error).message }
+  }
+}
+
+/**
  * 同步到单个平台
  */
 export async function syncToPlatform(

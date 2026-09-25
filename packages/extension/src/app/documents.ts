@@ -14,9 +14,8 @@ import {
   isLocalImagePath,
   parseMarkdownImages,
 } from '@wechatsync/core'
-import { getPlatformPreprocessConfigs } from '../adapters'
-import { preprocessForPlatform } from '../lib/content-processor'
-import { LOCAL_IMAGE_PREFIX, type PlatformContent, type SyncArticlePayload } from '../lib/messages'
+import { prepareArticle } from '../lib/prepare-article'
+import { LOCAL_IMAGE_PREFIX, type PreparedArticle } from '../lib/messages'
 
 const MARKDOWN_EXT = /\.(md|markdown|mdx|txt)$/i
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i
@@ -222,10 +221,9 @@ export async function buildArticlePayload(
   doc: MarkdownDoc,
   images: ImageFiles,
   platformIds: string[]
-): Promise<SyncArticlePayload['article']> {
+): Promise<PreparedArticle> {
   const registry = createImageRegistry()
   const markdown = await inlineImages(doc, images, file => registry.placeholder(file))
-  const html = markdownToHtml(markdown)
 
   let cover = doc.meta.cover.trim()
   if (cover && isLocalImagePath(cover)) {
@@ -233,24 +231,16 @@ export async function buildArticlePayload(
     cover = file ? await registry.placeholder(file) : ''
   }
 
-  // Markdown 平台直接使用原文，避免 HTML ↔ Markdown 往返造成格式损失；HTML 平台按配置预处理
-  const platformContents: Record<string, PlatformContent> = {}
-  const configs = getPlatformPreprocessConfigs(platformIds)
-  for (const [platformId, config] of Object.entries(configs)) {
-    if (config.outputFormat !== 'markdown') {
-      platformContents[platformId] = { html: preprocessForPlatform(html, config), markdown }
-    }
-  }
-
-  return {
-    title: doc.meta.title.trim() || doc.fileName,
-    markdown,
-    html,
-    summary: doc.meta.summary.trim() || undefined,
-    cover: cover || undefined,
-    tags: parseTags(doc.meta.tags),
-    category: doc.meta.category.trim() || undefined,
-    platformContents,
-    images: registry.images,
-  }
+  return prepareArticle(
+    {
+      title: doc.meta.title.trim() || doc.fileName,
+      markdown,
+      summary: doc.meta.summary.trim() || undefined,
+      cover: cover || undefined,
+      tags: parseTags(doc.meta.tags),
+      category: doc.meta.category.trim() || undefined,
+      images: registry.images,
+    },
+    platformIds
+  )
 }

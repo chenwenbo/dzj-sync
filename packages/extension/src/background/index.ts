@@ -1,25 +1,21 @@
 /**
  * Background Service Worker
  *
- * 只负责三件事：
  * 1. 点击扩展图标时打开 Markdown 同步页面
  * 2. 查询各平台登录状态
  * 3. 执行同步（保存草稿 / 直接发布），并把进度推送给页面
+ * 4. 维护与 MCP Server / CLI 的连接（AI 工具调用）
  */
-import type { Article, SyncResult } from '@wechatsync/core'
-import { checkAllPlatformsAuth, getAllPlatformMetas, syncToPlatform } from '../adapters'
-import * as wordpressAdapter from '../adapters/cms/wordpress'
-import * as metaweblogAdapter from '../adapters/cms/metaweblog'
-import { getCmsAccounts, getCmsPassword, type CMSAccount } from '../lib/cms-accounts'
-import { expandLocalImages, type SyncArticlePayload, type SyncProgress, type SyncResultItem } from '../lib/messages'
+import { checkAllPlatformsAuth } from '../adapters'
+import { getCmsAccounts } from '../lib/cms-accounts'
+import type { SyncArticlePayload } from '../lib/messages'
 import { createLogger } from '../lib/logger'
+import { cancelSync, syncArticle } from './sync'
+import { mcpClient, startMcpClient, stopMcpClient, getMcpStatus } from '../mcp/client'
 
 const logger = createLogger('Background')
 
 const APP_PATH = 'src/app/index.html'
-const CONCURRENCY_LIMIT = 3
-
-let abortController: AbortController | null = null
 
 // ============ 打开同步页面 ============
 
@@ -48,12 +44,55 @@ async function clearOrphanedRules() {
 chrome.runtime.onInstalled.addListener(clearOrphanedRules)
 chrome.runtime.onStartup.addListener(clearOrphanedRules)
 
+// ============ MCP 连接（CLI / Claude 等 AI 工具） ============
+
+const MCP_KEEPALIVE_ALARM = 'mcp_keepalive'
+
+async function getMcpSettings() {
+  const storage = await chrome.storage.local.get(['mcpEnabled', 'mcpToken', 'mcpServerUrl'])
+  return {
+    enabled: (storage.mcpEnabled as boolean | undefined) ?? false,
+    token: storage.mcpToken as string | undefined,
+    serverUrl: (storage.mcpServerUrl as string | undefined) || '',
+  }
+}
+
+/**
+ * 启用时连接 MCP Server（Service Worker 每次启动都会调用）
+ */
+async function initMcpIfEnabled() {
+  const settings = await getMcpSettings()
+  if (!settings.enabled) return
+
+  let token = settings.token
+  if (!token) {
+    token = crypto.randomUUID()
+    await chrome.storage.local.set({ mcpToken: token })
+  }
+  mcpClient.setToken(token)
+  if (settings.serverUrl) mcpClient.setServerUrl(settings.serverUrl)
+  if (!mcpClient.isConnected()) startMcpClient()
+  // Service Worker 空闲时会被回收，用定时器保活并在断开后重连
+  chrome.alarms.create(MCP_KEEPALIVE_ALARM, { periodInMinutes: 0.5 })
+}
+
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === MCP_KEEPALIVE_ALARM) initMcpIfEnabled().catch(() => {})
+})
+
+initMcpIfEnabled().catch(error => logger.warn('MCP init failed:', error))
+
 // ============ 消息处理 ============
 
 type Message =
   | { type: 'GET_PLATFORMS' }
   | { type: 'SYNC_ARTICLE'; payload: SyncArticlePayload }
   | { type: 'CANCEL_SYNC' }
+  | { type: 'MCP_STATUS' }
+  | { type: 'MCP_ENABLE' }
+  | { type: 'MCP_DISABLE' }
+  | { type: 'MCP_SET_SERVER_URL'; payload: { url: string } }
+  | { type: 'MCP_WATCH'; payload: { active: boolean } }
 
 chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) => {
   handleMessage(message)
@@ -73,142 +112,44 @@ async function handleMessage(message: Message) {
     case 'SYNC_ARTICLE':
       return { results: await syncArticle(message.payload) }
 
-    case 'CANCEL_SYNC': {
-      abortController?.abort()
-      return { cancelled: !!abortController }
+    case 'CANCEL_SYNC':
+      return { cancelled: cancelSync() }
+
+    case 'MCP_STATUS': {
+      const settings = await getMcpSettings()
+      return { ...settings, connected: getMcpStatus().connected }
     }
+
+    case 'MCP_ENABLE': {
+      await chrome.storage.local.set({ mcpEnabled: true })
+      await initMcpIfEnabled()
+      mcpClient.resetReconnect()
+      return { success: true, token: (await getMcpSettings()).token }
+    }
+
+    case 'MCP_DISABLE': {
+      // 只断开连接，保留 token，下次启用时复用
+      await chrome.storage.local.set({ mcpEnabled: false })
+      await chrome.alarms.clear(MCP_KEEPALIVE_ALARM)
+      mcpClient.clearToken()
+      stopMcpClient()
+      return { success: true }
+    }
+
+    case 'MCP_SET_SERVER_URL': {
+      await chrome.storage.local.set({ mcpServerUrl: message.payload.url || '' })
+      mcpClient.setServerUrl(message.payload.url)
+      mcpClient.disconnect()
+      if ((await getMcpSettings()).enabled) mcpClient.resetReconnect()
+      return { success: true }
+    }
+
+    case 'MCP_WATCH':
+      // 设置面板打开时加快重连
+      if ((await getMcpSettings()).enabled) mcpClient.setActivelyWatched(message.payload.active)
+      return { success: true }
 
     default:
       return { error: 'Unknown message' }
-  }
-}
-
-// ============ 同步 ============
-
-function sendProgress(progress: SyncProgress) {
-  chrome.runtime.sendMessage({ type: 'SYNC_PROGRESS', payload: progress }).catch(() => {})
-}
-
-async function syncArticle(payload: SyncArticlePayload): Promise<SyncResultItem[]> {
-  const { article, platforms, draftOnly } = payload
-  abortController = new AbortController()
-  const signal = abortController.signal
-
-  const metas = getAllPlatformMetas()
-  const cmsAccounts = await getCmsAccounts()
-
-  const tasks = platforms.map(id => {
-    const cms = cmsAccounts.find(a => a.id === id)
-    const name = cms?.name || metas.find(m => m.id === id)?.name || id
-    return { id, name, run: () => (cms ? syncToCms(cms, article, draftOnly) : syncToDsl(id, name, article, draftOnly)) }
-  })
-
-  const results: SyncResultItem[] = []
-
-  for (let i = 0; i < tasks.length; i += CONCURRENCY_LIMIT) {
-    const batch = tasks.slice(i, i + CONCURRENCY_LIMIT)
-    const batchResults = await Promise.all(batch.map(async task => {
-      let result: SyncResultItem
-      if (signal.aborted) {
-        result = { platform: task.id, platformName: task.name, success: false, error: '已取消' }
-      } else {
-        sendProgress({ platform: task.id, stage: 'starting' })
-        try {
-          result = { ...(await task.run()), platformName: task.name }
-        } catch (error) {
-          result = { platform: task.id, platformName: task.name, success: false, error: (error as Error).message }
-        }
-      }
-      sendProgress({ platform: task.id, stage: result.success ? 'completed' : 'failed', result })
-      return result
-    }))
-    results.push(...batchResults)
-  }
-
-  abortController = null
-  return results
-}
-
-/**
- * 同步到内置平台
- */
-async function syncToDsl(
-  platformId: string,
-  platformName: string,
-  article: SyncArticlePayload['article'],
-  draftOnly: boolean
-): Promise<SyncResultItem> {
-  const content = article.platformContents?.[platformId]
-  const platformArticle: Article = {
-    title: article.title,
-    markdown: expandLocalImages(content?.markdown ?? article.markdown, article.images),
-    html: expandLocalImages(content?.html ?? article.html, article.images),
-    summary: article.summary,
-    cover: article.cover && expandLocalImages(article.cover, article.images),
-    tags: article.tags,
-    category: article.category,
-  }
-
-  const result: SyncResult = await syncToPlatform(platformId, platformArticle, {
-    draftOnly,
-    onImageProgress: (current, total) =>
-      sendProgress({ platform: platformId, stage: 'uploading_images', imageProgress: { current, total } }),
-  })
-
-  return {
-    platform: platformId,
-    platformName,
-    success: result.success,
-    postUrl: result.postUrl,
-    draftOnly: result.draftOnly ?? true,
-    message: result.message,
-    error: result.error,
-  }
-}
-
-/**
- * 同步到自建站（WordPress / Typecho / MetaWeblog）
- */
-async function syncToCms(
-  account: CMSAccount,
-  article: SyncArticlePayload['article'],
-  draftOnly: boolean
-): Promise<SyncResultItem> {
-  const password = await getCmsPassword(account.id)
-  if (!password) {
-    return { platform: account.id, platformName: account.name, success: false, error: '密码未找到，请重新添加账户' }
-  }
-
-  const credentials = { url: account.url, username: account.username, password }
-  const cmsArticle = { title: article.title, content: expandLocalImages(article.html, article.images) }
-  const options = {
-    draftOnly,
-    onImageProgress: (current: number, total: number) =>
-      sendProgress({ platform: account.id, stage: 'uploading_images', imageProgress: { current, total } }),
-  }
-
-  let result: { success: boolean; postUrl?: string; message?: string; error?: string }
-  switch (account.type) {
-    case 'wordpress':
-      result = await wordpressAdapter.publish(credentials, cmsArticle, options)
-      break
-    case 'typecho':
-      result = await metaweblogAdapter.publishToTypecho(credentials, cmsArticle, options)
-      break
-    case 'metaweblog':
-      result = await metaweblogAdapter.publish(credentials, cmsArticle, options)
-      break
-    default:
-      result = { success: false, error: '不支持的站点类型' }
-  }
-
-  return {
-    platform: account.id,
-    platformName: account.name,
-    success: result.success,
-    postUrl: result.postUrl,
-    draftOnly,
-    message: result.message,
-    error: result.error,
   }
 }

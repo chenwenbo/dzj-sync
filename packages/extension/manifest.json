@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Markdown 多平台同步",
-  "description": "上传 Markdown 文档，一键保存草稿或直接发布到掘金、CSDN、知乎、博客园、语雀、WordPress 等平台",
+  "description": "上传 Markdown 文档，一键保存草稿或直接发布到掘金、CSDN、知乎、博客园、语雀、WordPress 等平台，支持 CLI / MCP / Claude Skill",
   "version": "3.0.0",
   "icons": {
     "16": "assets/icon-16.png",
@@ -17,7 +17,9 @@
     "unlimitedStorage",
     "cookies",
     "declarativeNetRequest",
-    "declarativeNetRequestWithHostAccess"
+    "declarativeNetRequestWithHostAccess",
+    "offscreen",
+    "alarms"
   ],
   "host_permissions": [
     "http://*/*",

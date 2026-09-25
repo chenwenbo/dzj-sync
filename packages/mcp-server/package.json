@@ -1,0 +1,48 @@
+{
+  "name": "@wechatsync/mcp-server",
+  "version": "2.0.0",
+  "description": "MCP Server for Markdown 多平台同步 - 让 Claude 等 AI 工具通过 Chrome 扩展同步 / 发布文章",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./bridge": "./dist/exports.js"
+  },
+  "bin": {
+    "wechatsync-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "wechatsync",
+    "mcp",
+    "claude",
+    "websocket",
+    "bridge"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chenwenbo/dzj-sync"
+  },
+  "author": "fun",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "tsup": "^8.5.1",
+    "typescript": "^5.7.2"
+  }
+}
