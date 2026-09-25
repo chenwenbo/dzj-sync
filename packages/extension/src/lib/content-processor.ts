@@ -1,44 +1,29 @@
 /**
- * 内容预处理模块 (Content Script 环境，有 DOM)
+ * 内容预处理模块（需要 DOM，在同步页面中运行）
  *
- * 架构说明:
- * 1. 用户选择 N 个平台
- * 2. 读取每个平台的预处理配置
- * 3. Content Script 为每个平台分别预处理
- * 4. 每个平台收到自己定制的 html/markdown
- * 5. Service Worker 只做图片上传 + 调用 API
+ * 流程:
+ * 1. Markdown 渲染为 HTML
+ * 2. 读取每个目标平台的预处理配置
+ * 3. 为每个平台分别预处理，得到定制的 html
+ * 4. Service Worker 只做图片上传 + 调用平台 API
  */
 
-import { htmlToMarkdownNative, SOURCE_LINK_REMOVE_DOMAINS, SOURCE_LINK_REDIRECT_RULES, type PreprocessConfig } from '@wechatsync/core'
+import { SOURCE_LINK_REMOVE_DOMAINS, SOURCE_LINK_REDIRECT_RULES, type PreprocessConfig } from '@wechatsync/core'
 import { createLogger } from './logger'
 
 const logger = createLogger('ContentProcessor')
 
-// 注意：htmlToMarkdownNative 需要 DOM 环境，只能在 Content Script 中使用
-
-// Re-export PreprocessConfig for backward compatibility
-export type { PreprocessConfig }
 
 /**
- * 预处理结果
- */
-export interface PreprocessResult {
-  html: string
-  markdown: string
-}
-
-/**
- * 为单个平台预处理内容
- * @param rawHtml 原始 HTML
+ * 为单个平台预处理 HTML
+ * @param rawHtml Markdown 渲染出的 HTML
  * @param config 平台的预处理配置
- * @returns 处理后的 html 和 markdown
- *
- * 注意：代码块应在入口处用 backupAndSimplifyCodeBlocks 在原始 DOM 上预处理，
- * 此函数中的 processCodeBlocks 会跳过已处理的代码块（有 data-code-simplified 标记）
+ * @returns 处理后的 HTML
  */
-export function preprocessForPlatform(rawHtml: string, config: PreprocessConfig): PreprocessResult {
-  // 创建临时 DOM 容器
-  const container = document.createElement('div')
+export function preprocessForPlatform(rawHtml: string, config: PreprocessConfig): string {
+  // 使用惰性文档，避免解析时加载图片等资源
+  const doc = document.implementation.createHTMLDocument('')
+  const container = doc.createElement('div')
   container.innerHTML = rawHtml
 
   if (config.processCodeBlocks) {
@@ -152,31 +137,7 @@ export function preprocessForPlatform(rawHtml: string, config: PreprocessConfig)
     removeNestedEmptyContainers(container)
   }
 
-  // 获取处理后的 HTML
-  const html = container.innerHTML
-
-  // 总是生成 markdown，确保需要 markdown 的适配器能获取到内容
-  const markdown = htmlToMarkdownNative(html)
-  return { html, markdown }
-}
-
-/**
- * 为多个平台预处理内容
- * @param rawHtml 原始 HTML
- * @param configs 各平台的预处理配置 { platformId: config }
- * @returns 各平台的预处理结果 { platformId: { html, markdown } }
- */
-export function preprocessForMultiplePlatforms(
-  rawHtml: string,
-  configs: Record<string, PreprocessConfig>
-): Record<string, PreprocessResult> {
-  const results: Record<string, PreprocessResult> = {}
-
-  for (const [platformId, config] of Object.entries(configs)) {
-    results[platformId] = preprocessForPlatform(rawHtml, config)
-  }
-
-  return results
+  return container.innerHTML
 }
 
 // ============ 预处理函数 ============
@@ -185,7 +146,7 @@ export function preprocessForMultiplePlatforms(
  * 移除 HTML 注释
  */
 function removeComments(container: HTMLElement): void {
-  const iterator = document.createNodeIterator(
+  const iterator = container.ownerDocument.createNodeIterator(
     container,
     NodeFilter.SHOW_COMMENT,
     null
@@ -281,7 +242,7 @@ function processLinks(container: HTMLElement, keepDomains?: string[]): void {
     }
 
     // 用 span 替换 a 标签
-    const span = document.createElement('span')
+    const span = container.ownerDocument.createElement('span')
     span.innerHTML = link.innerHTML
     link.parentNode?.replaceChild(span, link)
   })
@@ -482,11 +443,6 @@ function processCodeBlocks(container: HTMLElement): void {
 
   pres.forEach((pre) => {
     try {
-      // 跳过已经被 backupAndSimplifyCodeBlocks 处理过的代码块
-      if (pre.hasAttribute('data-code-simplified')) {
-        return
-      }
-
       // 2. 再用结构检测移除未知的行号元素（通用方案）
       removeLineNumberSiblings(pre)
 
@@ -508,8 +464,7 @@ function processCodeBlocks(container: HTMLElement): void {
         newHtml = lines.join('\n')
       } else {
         // 普通格式：用 innerText 提取（保留换行）
-        // 注意：如果代码块未经 backupAndSimplifyCodeBlocks 预处理，
-        // 在 detached DOM 上 innerText 可能无法正确处理 <br> 等
+        // 注意：在 detached DOM 上 innerText 可能无法正确处理 <br> 等
         const text = pre.innerText || pre.textContent || ''
         newHtml = `<code>${escapeHtml(text)}</code>`
       }
@@ -570,13 +525,6 @@ function detectCodeLang(pre: Element): string | null {
   }
 
   return null
-}
-
-/**
- * 仅处理代码块（供 Reader 路径提前调用）
- */
-export function preprocessCodeBlocks(container: HTMLElement): void {
-  processCodeBlocks(container)
 }
 
 /**
@@ -647,7 +595,7 @@ function removeImageAttributes(container: HTMLElement, config: PreprocessConfig)
 function convertSections(container: HTMLElement, targetTag: 'div' | 'p'): void {
   const sections = container.querySelectorAll('section')
   sections.forEach((section) => {
-    const newEl = document.createElement(targetTag)
+    const newEl = container.ownerDocument.createElement(targetTag)
     newEl.innerHTML = section.innerHTML
     // 复制属性
     Array.from(section.attributes).forEach((attr) => {
@@ -790,7 +738,7 @@ function unwrapSingleChildContainers(container: HTMLElement): void {
  */
 function compactHtml(container: HTMLElement): void {
   // 递归处理文本节点，移除标签间的空白
-  const walker = document.createTreeWalker(
+  const walker = container.ownerDocument.createTreeWalker(
     container,
     NodeFilter.SHOW_TEXT,
     null
@@ -956,7 +904,7 @@ function convertTablesToText(container: HTMLElement): void {
     })
 
     // 构建替换内容
-    const fragment = document.createDocumentFragment()
+    const fragment = container.ownerDocument.createDocumentFragment()
 
     if (headers.length > 0) {
       // 有表头: "列名: 值 | 列名: 值"
@@ -965,14 +913,14 @@ function convertTablesToText(container: HTMLElement): void {
           const header = headers[i] || ''
           return header ? `${header}: ${val}` : val
         })
-        const p = document.createElement('p')
+        const p = container.ownerDocument.createElement('p')
         p.textContent = parts.join(' | ')
         fragment.appendChild(p)
       })
     } else {
       // 无表头: 直接用 " | " 分隔
       rows.forEach((row) => {
-        const p = document.createElement('p')
+        const p = container.ownerDocument.createElement('p')
         p.textContent = row.join(' | ')
         fragment.appendChild(p)
       })
@@ -992,156 +940,4 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;')
-}
-
-// ============ 兼容旧 API ============
-
-/**
- * @deprecated 使用 preprocessForPlatform 代替
- *
- * 注意：此函数是全局预处理，不使用平台特定配置。
- * 如需使用平台配置（如知乎的 removeEmptyLines），应使用 preprocessForPlatform。
- */
-export function preprocessContentDOM(container: HTMLElement): void {
-  // 执行默认的全部预处理（不包含平台特定处理）
-  removeComments(container)
-  removeElements(container, ['iframe', 'script', 'style', 'noscript'])
-  removeElements(container, ['mpprofile', 'qqmusic', 'mpvoice', 'mpcps', 'mp-miniprogram', 'mp-common-product'])
-  processSvgImages(container)
-  processLazyImages(container)
-  processCodeBlocks(container)
-  removeEmptyElements(container)
-  removeDataAttributes(container)
-  removeImageAttributes(container, { outputFormat: 'html', removeSrcset: true, removeSizes: true })
-}
-
-/**
- * @deprecated 使用 preprocessForPlatform 代替
- */
-export function preprocessContentString(html: string): string {
-  const tempDiv = document.createElement('div')
-  tempDiv.innerHTML = html
-  preprocessContentDOM(tempDiv)
-  return tempDiv.innerHTML
-}
-
-// ============ 代码块 Backup/Restore (用于原始 DOM 处理) ============
-
-/**
- * 元素备份信息
- */
-export interface ElementBackup {
-  element: Element
-  originalHTML: string
-}
-
-/**
- * 在原始 DOM 上简化代码块，返回备份以便恢复
- * 必须在克隆之前调用，因为 innerText 只在真实 DOM 上正确工作
- *
- * 使用与 processCodeBlocks 相同的逻辑，确保一致性
- *
- * @param root 要处理的根元素（默认为 document.body）
- */
-export function backupAndSimplifyCodeBlocks(root: Element = document.body): ElementBackup[] {
-  const backups: ElementBackup[] = []
-
-  // 行号元素选择器（用于临时隐藏）
-  const GUTTER_SELECTORS = [
-    '.gutter',
-    '.line-numbers-rows',
-    '.hljs-ln-numbers',
-    '.code-snippet__line-index',
-    'ul.code-snippet__line-index',
-    '[class*="line-number"]',
-    '[class*="lineNumber"]',
-  ].join(', ')
-
-  root.querySelectorAll('pre').forEach((pre) => {
-    try {
-      // 保存原始 HTML
-      const originalHTML = pre.innerHTML
-
-      // 临时隐藏行号元素（不删除，因为要恢复）
-      const gutterEls = pre.querySelectorAll(GUTTER_SELECTORS)
-      const gutterDisplays: string[] = []
-      gutterEls.forEach((el, i) => {
-        gutterDisplays[i] = (el as HTMLElement).style.display
-        ;(el as HTMLElement).style.display = 'none'
-      })
-
-      // 使用结构检测移除未知的行号元素（临时）
-      // 注意：这里不能调用 removeLineNumberSiblings 因为会修改 DOM
-      // 我们只是临时隐藏，所以跳过这步
-
-      // 查找代码行容器（与 processCodeBlocks 相同的逻辑）
-      const linesContainer = findCodeLinesContainer(pre)
-
-      let cleanedText: string
-
-      if (linesContainer) {
-        // 多行容器：每个子元素是一行代码
-        const lines: string[] = []
-        Array.from(linesContainer.children).forEach((child) => {
-          const text = child.textContent || ''
-          lines.push(text)
-        })
-        cleanedText = lines.join('\n')
-      } else {
-        // 普通格式：用 innerText 提取（在真实 DOM 上能正确处理 br 等）
-        const code = pre.querySelector('code')
-        const targetEl = (code || pre) as HTMLElement
-        cleanedText = targetEl.innerText || ''
-      }
-
-      // 恢复行号显示
-      gutterEls.forEach((el, i) => {
-        ;(el as HTMLElement).style.display = gutterDisplays[i]
-      })
-
-      // 清理首尾空白
-      cleanedText = cleanedText
-        .replace(/\r\n/g, '\n')
-        .replace(/\r/g, '\n')
-        .replace(/^\n+/, '')
-        .replace(/\n+$/, '')
-
-      // 跳过空代码块
-      if (!cleanedText.trim()) return
-
-      logger.debug('[backupAndSimplifyCodeBlocks] original:', originalHTML.slice(0, 100))
-      logger.debug('[backupAndSimplifyCodeBlocks] cleaned text:', cleanedText.slice(0, 100))
-
-      // 在替换 innerHTML 前检测语言（之后 data-lang/class 会丢失）
-      const lang = detectCodeLang(pre)
-
-      backups.push({
-        element: pre,
-        originalHTML: originalHTML,
-      })
-
-      // 替换为纯文本，添加标记表示已处理
-      pre.innerHTML = `<code>${escapeHtml(cleanedText)}</code>`
-      pre.setAttribute('data-code-simplified', 'true')
-
-      // 保留语言信息到标准格式
-      if (lang) {
-        pre.setAttribute('data-lang', lang)
-        pre.className = `language-${lang}`
-      }
-    } catch (e) {
-      logger.error('[backupAndSimplifyCodeBlocks] error:', e)
-    }
-  })
-
-  return backups
-}
-
-/**
- * 恢复被简化的代码块
- */
-export function restoreCodeBlocks(backups: ElementBackup[]): void {
-  backups.forEach(({ element, originalHTML }) => {
-    element.innerHTML = originalHTML
-  })
 }

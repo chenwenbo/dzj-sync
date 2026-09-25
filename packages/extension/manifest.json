@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "文章同步助手",
-  "description": "一键同步文章到知乎、头条、掘金等 20+ 平台，支持 WordPress 等自建站",
-  "version": "2.0.9",
+  "name": "Markdown 多平台同步",
+  "description": "上传 Markdown 文档，一键保存草稿或直接发布到掘金、CSDN、知乎、博客园、语雀、WordPress 等平台",
+  "version": "3.0.0",
   "icons": {
     "16": "assets/icon-16.png",
     "48": "assets/icon-48.png",
@@ -10,19 +10,14 @@
   },
   "action": {
     "default_icon": "assets/icon-48.png",
-    "default_popup": "src/popup/index.html"
+    "default_title": "Markdown 多平台同步"
   },
   "permissions": [
     "storage",
     "unlimitedStorage",
     "cookies",
     "declarativeNetRequest",
-    "declarativeNetRequestWithHostAccess",
-    "scripting",
-    "tabs",
-    "alarms",
-    "contextMenus",
-    "downloads"
+    "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
     "http://*/*",
@@ -31,41 +26,5 @@
   "background": {
     "service_worker": "src/background/index.ts",
     "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["src/content/api.ts"],
-      "run_at": "document_start",
-      "all_frames": true
-    },
-    {
-      "matches": ["https://mp.weixin.qq.com/s/*", "https://mp.weixin.qq.com/s?*"],
-      "js": ["src/content/weixin.ts"],
-      "run_at": "document_end"
-    },
-    {
-      "matches": ["https://mp.weixin.qq.com/cgi-bin/appmsg*"],
-      "js": ["src/content/weixin-editor.ts"],
-      "run_at": "document_end"
-    },
-    {
-      "matches": ["https://mp.toutiao.com/*"],
-      "js": ["src/content/toutiao.ts"],
-      "run_at": "document_end"
-    },
-    {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": [
-        "src/content/extractor.ts"
-      ],
-      "run_at": "document_end"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["assets/*", "src/editor/index.html", "src/sync-dialog/index.html", "inject-api.js"],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  }
 }

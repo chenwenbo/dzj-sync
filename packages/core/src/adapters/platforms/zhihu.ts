@@ -18,7 +18,7 @@ export class ZhihuAdapter extends CodeAdapter {
     name: '知乎',
     icon: 'https://static.zhihu.com/static/favicon.ico',
     homepage: 'https://www.zhihu.com',
-    capabilities: ['article', 'draft', 'image_upload', 'tags', 'cover'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload', 'tags', 'cover'],
   }
 
   /** 预处理配置: 知乎使用 HTML，需要特殊处理 */
@@ -133,7 +133,7 @@ export class ZhihuAdapter extends CodeAdapter {
       const draftId = createData.id
       logger.debug('Draft created:', draftId)
 
-      // 2. 使用预处理好的 HTML（Content Script 已处理代码块、图片、特殊标签等）
+      // 2. 使用预处理好的 HTML（同步页面已处理代码块、特殊标签等）
       // 知乎使用 HTML 格式
       let content = article.html || ''
 
@@ -178,14 +178,104 @@ export class ZhihuAdapter extends CodeAdapter {
 
       const draftUrl = `https://zhuanlan.zhihu.com/p/${draftId}/edit`
 
-      return this.createResult(true, {
-        postId: draftId,
-        postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+      // 6. 按需直接发布
+      return this.finishWithPublish({ postId: draftId, postUrl: draftUrl }, options, async () => {
+        await this.publishDraft(draftId)
+        return { postId: draftId, postUrl: `https://zhuanlan.zhihu.com/p/${draftId}` }
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  /**
+   * 发布草稿
+   * 优先使用创作中心的新接口，失败时回退到专栏旧接口
+   */
+  private async publishDraft(draftId: string): Promise<void> {
+    const settings = {
+      column: null,
+      commentPermission: 'anyone',
+      disclaimer_type: 'none',
+      disclaimer_status: 'close',
+      table_of_contents_enabled: false,
+      commercial_report_info: { commercial_types: [] },
+      commercial_zhitask_bind_info: null,
+      canReward: false,
+    }
+
+    const errors: string[] = []
+
+    // 新接口（知乎网页编辑器当前使用）
+    try {
+      const response = await this.runtime.fetch('https://www.zhihu.com/api/v4/content/publish', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-requested-with': 'fetch',
+        },
+        body: JSON.stringify({
+          action: 'article',
+          data: {
+            publish: { traceId: `${Date.now()},${crypto.randomUUID()}` },
+            extra_info: {
+              publisher: 'pc',
+              pc_business_params: JSON.stringify(settings),
+            },
+            draft: { disabled: 1, id: draftId, isPublished: false },
+            commentsPermission: { comment_permission: 'anyone' },
+            creationStatement: { disclaimer_type: 'none', disclaimer_status: 'close' },
+            contentsTables: { table_of_contents_enabled: false },
+            commercialReportInfo: { isReport: 0 },
+            appreciate: { can_reward: false, tagline: '' },
+            hybridInfo: {},
+          },
+        }),
+      })
+      const text = await response.text()
+      logger.debug('Publish (v4) response:', response.status, text.substring(0, 300))
+      if (response.ok) {
+        const data = text ? JSON.parse(text) as { code?: number; error?: { message?: string }; message?: string } : {}
+        if (!data.error && (data.code === undefined || data.code === 0)) {
+          return
+        }
+        errors.push(data.error?.message || data.message || `code ${data.code}`)
+      } else {
+        errors.push(`HTTP ${response.status}`)
+      }
+    } catch (error) {
+      errors.push((error as Error).message)
+    }
+
+    // 旧接口
+    const response = await this.runtime.fetch(
+      `https://zhuanlan.zhihu.com/api/articles/${draftId}/publish`,
+      {
+        method: 'PUT',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-requested-with': 'fetch',
+        },
+        body: JSON.stringify(settings),
+      }
+    )
+    if (response.ok) {
+      return
+    }
+
+    const text = await response.text()
+    logger.debug('Publish (legacy) response:', response.status, text.substring(0, 300))
+    let message = `HTTP ${response.status}`
+    try {
+      const data = JSON.parse(text) as { error?: { message?: string } }
+      if (data.error?.message) message = data.error.message
+    } catch {
+      // 非 JSON 响应
+    }
+    errors.push(message)
+    throw new Error(errors.join('；'))
   }
 
   /**

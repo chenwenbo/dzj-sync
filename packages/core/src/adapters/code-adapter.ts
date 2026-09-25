@@ -2,23 +2,20 @@
  * 代码适配器基类
  *
  * 架构说明:
- * - Content Script (有 DOM): 负责所有 HTML/DOM 处理
- *   - 代码块处理 (使用 innerText)
- *   - 懒加载图片处理
- *   - HTML 转 Markdown
+ * - 同步页面 (有 DOM): 解析 Markdown、渲染 HTML、按平台预处理
  * - Service Worker (无 DOM): 只负责 API 调用
  *   - 接收已处理好的 html 和 markdown
- *   - 图片上传 (URL 替换，不需要 DOM)
- *   - 调用平台 API
+ *   - 图片上传 (URL 替换，不需要 DOM；本地图片为 data URI)
+ *   - 调用平台 API（保存草稿，按需直接发布）
  *
  * 适配器接收的 Article 对象:
- * - article.html: 已预处理的 HTML (代码块已简化，图片已处理)
- * - article.markdown: 已转换的 Markdown
+ * - article.html: 已按平台预处理的 HTML
+ * - article.markdown: Markdown 原文
  *
  * 适配器只需:
  * 1. 选择使用 html 还是 markdown
  * 2. 处理图片上传 (如果平台需要)
- * 3. 调用平台 API
+ * 3. 调用平台 API，支持直接发布时通过 finishWithPublish 完成发布
  */
 import type { Article, AuthResult, SyncResult, PlatformMeta, HeaderRule } from '../types'
 import type { RuntimeInterface } from '../runtime/interface'
@@ -360,6 +357,49 @@ export abstract class CodeAdapter implements PlatformAdapter {
   protected async dataUriToBlob(dataUri: string): Promise<Blob> {
     const response = await fetch(dataUri)
     return response.blob()
+  }
+
+  // ============ 直接发布 ============
+
+  /**
+   * 本次是否需要直接发布（调用方要求发布，且平台支持）
+   */
+  protected wantsPublish(options?: PublishOptions): boolean {
+    return options?.draftOnly === false && this.meta.capabilities.includes('publish')
+  }
+
+  /**
+   * 草稿保存完成后，按需直接发布
+   *
+   * - 未要求发布：返回草稿结果
+   * - 发布成功：返回线上文章链接（draftOnly: false）
+   * - 发布失败：草稿仍然保留，返回成功 + 失败原因，避免内容丢失
+   */
+  protected async finishWithPublish(
+    draft: { postId: string; postUrl: string },
+    options: PublishOptions | undefined,
+    publishFn: () => Promise<{ postId?: string; postUrl: string; message?: string }>
+  ): Promise<SyncResult> {
+    if (!this.wantsPublish(options)) {
+      return this.createResult(true, { ...draft, draftOnly: true })
+    }
+
+    try {
+      const published = await publishFn()
+      return this.createResult(true, {
+        postId: published.postId ?? draft.postId,
+        postUrl: published.postUrl,
+        draftOnly: false,
+        message: published.message,
+      })
+    } catch (error) {
+      logger.warn(`[${this.meta.id}] Publish failed, draft kept:`, error)
+      return this.createResult(true, {
+        ...draft,
+        draftOnly: true,
+        message: `草稿已保存，但直接发布失败：${(error as Error).message}`,
+      })
+    }
   }
 
   // ============ 工具方法 ============

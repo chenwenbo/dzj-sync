@@ -143,26 +143,18 @@ export class WeixinAdapter extends CodeAdapter {
         }
       }
 
-      // 微信到微信：使用原始 HTML，跳过所有处理
-      let content = (article.source?.platform === 'weixin' && (article as any).rawHtml)
-        ? (article as any).rawHtml
-        : (article.html || '')
-
-      if (article.source?.platform === 'weixin') {
-        logger.info('Source is WeChat, using raw HTML, skipping content processing')
-      } else {
-        content = this.processLatex(content)
-        content = this.stripExternalLinks(content)
-        content = await this.processImages(
-          content,
-          (src) => this.uploadImageByUrl(src),
-          {
-            skipPatterns: ['mmbiz.qpic.cn', 'mmbiz.qlogo.cn'],
-            onProgress: options?.onImageProgress,
-          }
-        )
-        content = this.processContent(content)
-      }
+      let content = article.html || ''
+      content = this.processLatex(content)
+      content = this.stripExternalLinks(content)
+      content = await this.processImages(
+        content,
+        (src) => this.uploadImageByUrl(src),
+        {
+          skipPatterns: ['mmbiz.qpic.cn', 'mmbiz.qlogo.cn'],
+          onProgress: options?.onImageProgress,
+        }
+      )
+      content = this.processContent(content)
 
       const formData = new URLSearchParams({
         token: this.weixinMeta!.token,
@@ -261,7 +253,7 @@ export class WeixinAdapter extends CodeAdapter {
       return this.createResult(true, {
         postId: res.appMsgId,
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,

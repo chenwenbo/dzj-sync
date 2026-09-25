@@ -165,6 +165,41 @@ async function getLatestPostId(
 }
 
 /**
+ * 获取已发布文章的访问链接（metaWeblog.getPost 返回的 link / permaLink）
+ */
+async function getPostLink(
+  credentials: MetaWeblogCredentials,
+  endpoint: string,
+  postId: string
+): Promise<string | null> {
+  try {
+    const body = buildXmlRpcRequest('metaWeblog.getPost', [
+      postId,
+      credentials.username,
+      credentials.password,
+    ])
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/xml',
+      },
+      body,
+    })
+
+    if (!response.ok) {
+      return null
+    }
+
+    const xml = await response.text()
+    const match = xml.match(/<name>(?:permaLink|link)<\/name>\s*<value>(?:<string>)?([^<]+)(?:<\/string>)?<\/value>/)
+    return match ? match[1].trim() : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * 获取 XML-RPC 端点
  */
 function getEndpoint(credentials: MetaWeblogCredentials): string {
@@ -435,7 +470,8 @@ export async function processArticleImages(
       throw new Error('操作已取消')
     }
 
-    if (!src || src.startsWith('data:')) continue
+    // 跳过空 src（data URI 为本地图片，需要上传）
+    if (!src) continue
 
     const siteDomain = new URL(credentials.url).hostname
     try {
@@ -455,7 +491,7 @@ export async function processArticleImages(
     let newUrl = uploadedMap.get(src)
 
     if (!newUrl) {
-      logger.debug(` Uploading image ${processed}/${matches.length}: ${src}`)
+      logger.debug(` Uploading image ${processed}/${matches.length}: ${src.substring(0, 100)}`)
       const uploadResult = await uploadImageByUrl(credentials, src, signal)
       if (uploadResult?.url) {
         newUrl = uploadResult.url
@@ -538,7 +574,7 @@ export async function publish(
     const baseUrl = credentials.url.replace(/\/$/, '')
     const postUrl = options?.draftOnly
       ? `${baseUrl}/admin/manage-posts.php?cid=${postId}`
-      : `${baseUrl}/archives/${postId}/`
+      : (await getPostLink(credentials, endpoint, postId)) || baseUrl
 
     const message = failedImages > 0 ? `${failedImages} 张图片上传失败` : undefined
     return { success: true, postId, postUrl, message }
@@ -682,7 +718,7 @@ export async function publishToTypecho(
       credentials.username,
       credentials.password,
       post,
-      false, // publish flag，旧版固定为 false
+      !options?.draftOnly, // publish flag
     ])
 
     const response = await fetch(endpoint, {
@@ -718,7 +754,12 @@ export async function publishToTypecho(
     }
 
     let postUrl: string
-    if (postId && postId !== '0') {
+    const permalink = !options?.draftOnly && postId && postId !== '0'
+      ? await getPostLink(credentials, endpoint, postId)
+      : null
+    if (permalink) {
+      postUrl = permalink
+    } else if (postId && postId !== '0') {
       // Typecho 编辑页面 URL 格式
       postUrl = `${baseUrl}/admin/write-post.php?cid=${postId}`
     } else {

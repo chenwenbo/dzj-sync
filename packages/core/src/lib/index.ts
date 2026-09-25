@@ -6,6 +6,9 @@ export * from './markdown-to-draft'
 // Markdown 图片解析
 export * from './markdown-images'
 
+// Markdown 文档解析（frontmatter / 标题 / 本地图片）
+export * from './markdown-document'
+
 // 日志系统
 export * from './logger'
 

@@ -5,6 +5,7 @@ import { CodeAdapter, type ImageUploadResult } from '../code-adapter'
 import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
 import type { PublishOptions } from '../types'
 import { createLogger } from '../../lib/logger'
+import { buildSummary } from '../../lib/markdown-document'
 
 const logger = createLogger('CSDN')
 
@@ -20,7 +21,7 @@ export class CSDNAdapter extends CodeAdapter {
     name: 'CSDN',
     icon: 'https://g.csdnimg.cn/static/logo/favicon32.ico',
     homepage: 'https://editor.csdn.net/md/',
-    capabilities: ['article', 'draft', 'image_upload'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload'],
   }
 
   /** 预处理配置: CSDN 使用 Markdown 格式 */
@@ -208,65 +209,108 @@ export class CSDNAdapter extends CodeAdapter {
       // Get HTML content (CSDN API needs both markdown and HTML)
       const htmlContent = article.html || ''
 
-      // Generate signature and save article
-      const apiPath = '/blog-console-api/v3/mdeditor/saveArticle'
-      const headers = await this.signRequest(apiPath)
-
-      const response = await this.runtime.fetch(
-        `https://bizapi.csdn.net${apiPath}`,
-        {
-          method: 'POST',
-          credentials: 'include',
-          headers,
-          body: JSON.stringify({
-            title: article.title,
-            markdowncontent: markdown,
-            content: htmlContent,
-            readType: 'public',
-            level: 0,
-            tags: '',
-            status: 2, // 草稿
-            categories: '',
-            type: 'original',
-            original_link: '',
-            authorized_status: false,
-            not_auto_saved: '1',
-            source: 'pc_mdeditor',
-            cover_images: [],
-            cover_type: 1,
-            is_new: 1,
-            vote_id: 0,
-            resource_id: '',
-            pubStatus: 'draft',
-            creator_activity_id: '',
-          }),
-        }
-      )
-
-      const res = await response.json() as {
-        code: number
-        message?: string
-        msg?: string
-        data?: { id: string }
+      // 1) 先保存草稿
+      const baseBody = {
+        title: article.title,
+        markdowncontent: markdown,
+        content: htmlContent,
+        readType: 'public',
+        level: 0,
+        tags: '',
+        status: 2, // 草稿
+        categories: '',
+        type: 'original',
+        original_link: '',
+        authorized_status: false,
+        not_auto_saved: '1',
+        source: 'pc_mdeditor',
+        cover_images: [] as string[],
+        cover_type: 1,
+        is_new: 1,
+        vote_id: 0,
+        resource_id: '',
+        pubStatus: 'draft',
+        creator_activity_id: '',
       }
 
-      logger.debug('Save response:', res)
-
-      if (res.code !== 200 || !res.data?.id) {
-        throw new Error(res.msg || res.message || '保存草稿失败')
+      const draft = await this.saveArticle(baseBody)
+      if (!draft.id) {
+        throw new Error(draft.error || '保存草稿失败')
       }
 
-      const postId = res.data.id
+      const postId = draft.id
       const draftUrl = `https://editor.csdn.net/md?articleId=${postId}`
 
-      return this.createResult(true, {
-        postId: postId,
-        postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+      // 2) 按需直接发布：同一篇文章以 status=0 再保存一次
+      return this.finishWithPublish({ postId, postUrl: draftUrl }, options, async () => {
+        const tags = (article.tags || []).slice(0, 7)
+        if (tags.length === 0) {
+          throw new Error('CSDN 发布需要至少一个标签，请在 frontmatter 中设置 tags')
+        }
+
+        const coverImages: string[] = []
+        if (article.cover) {
+          try {
+            coverImages.push((await this.uploadImageByUrl(article.cover)).url)
+          } catch (error) {
+            logger.warn('Cover upload failed:', error)
+          }
+        }
+
+        const published = await this.saveArticle({
+          ...baseBody,
+          id: postId,
+          tags: tags.join(','),
+          categories: article.category || '',
+          Description: buildSummary(article, 256),
+          cover_images: coverImages,
+          cover_type: coverImages.length > 0 ? 1 : 0,
+          is_new: 0,
+          status: 0,
+          pubStatus: 'publish',
+        })
+        if (!published.id) {
+          throw new Error(published.error || '发布失败')
+        }
+
+        return {
+          postId: published.id,
+          postUrl: published.url || `https://blog.csdn.net/${this.userInfo?.csdnid}/article/details/${published.id}`,
+          message: '已提交发布，CSDN 审核通过后可见',
+        }
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  /**
+   * 调用 CSDN saveArticle 接口（草稿与发布共用）
+   */
+  private async saveArticle(body: Record<string, unknown>): Promise<{ id?: string; url?: string; error?: string }> {
+    const apiPath = '/blog-console-api/v3/mdeditor/saveArticle'
+    const headers = await this.signRequest(apiPath)
+
+    const response = await this.runtime.fetch(`https://bizapi.csdn.net${apiPath}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify(body),
+    })
+
+    const res = await response.json() as {
+      code: number
+      message?: string
+      msg?: string
+      data?: { id: string | number; url?: string }
+    }
+
+    logger.debug('Save response:', res)
+
+    if (res.code !== 200 || !res.data?.id) {
+      return { error: res.msg || res.message || `错误码 ${res.code}` }
+    }
+    return { id: String(res.data.id), url: res.data.url }
   }
 
   /**

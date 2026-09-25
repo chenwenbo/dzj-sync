@@ -23,7 +23,7 @@
 │  │  │          RuntimeInterface                │    │   │
 │  │  │  - fetch (with cookies)                  │    │   │
 │  │  │  - headerRules (declarativeNetRequest)   │    │   │
-│  │  │  - storage / session                     │    │   │
+│  │  │  - storage / cookies                     │    │   │
 │  │  └──────────────────────────────────────────┘    │   │
 │  └──────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
@@ -36,11 +36,10 @@ Service Worker **不可用** 的 API：
 | API | 说明 | 替代方案 |
 |-----|------|----------|
 | `DOMParser` | DOM 解析 | 正则表达式提取 |
-| `document` | 文档对象 | 正则表达式 / runtime.dom |
+| `document` | 文档对象 | 正则表达式（DOM 预处理在同步页面中完成） |
 | `window` | 全局窗口对象 | 不可用 |
 | `XMLHttpRequest` | 传统 AJAX | `fetch` API |
 | `localStorage` | 本地存储 | `runtime.storage` |
-| `sessionStorage` | 会话存储 | `runtime.session` |
 | `alert/confirm/prompt` | 对话框 | 不可用 |
 | `Image` | 图片对象 | `fetch` + `Blob` |
 | `Canvas` | 画布操作 | 不可用 |
@@ -323,11 +322,12 @@ interface AuthResult {
 ```typescript
 interface Article {
   title: string
-  html?: string      // HTML 格式内容
-  markdown?: string  // Markdown 格式内容
-  cover?: string     // 封面图 URL
-  summary?: string   // 摘要
-  tags?: string[]    // 标签
+  markdown: string   // Markdown 原文（本地图片已内联为 data URI）
+  html?: string      // 渲染并按平台预处理后的 HTML
+  cover?: string     // 封面图（来自 frontmatter）
+  summary?: string   // 摘要（来自 frontmatter）
+  tags?: string[]    // 标签（来自 frontmatter）
+  category?: string  // 分类（来自 frontmatter）
 }
 ```
 
@@ -339,11 +339,34 @@ interface SyncResult {
   success: boolean
   postId?: string    // 文章 ID
   postUrl?: string   // 文章 URL
-  draftOnly?: boolean // 是否仅草稿
+  draftOnly?: boolean // true: 草稿；false: 已直接发布
+  message?: string   // 额外提示（如"草稿已保存，但直接发布失败：..."）
   error?: string
   timestamp: number
 }
 ```
+
+### 4.5 直接发布
+
+`publish(article, { draftOnly: false })` 表示用户选择了「直接发布」。支持直接发布的适配器需要：
+
+1. 在 `meta.capabilities` 中声明 `'publish'`
+2. 先按原流程保存草稿，再调用 `finishWithPublish` 完成发布：
+
+```typescript
+return this.finishWithPublish({ postId, postUrl: draftUrl }, options, async () => {
+  const res = await this.postJson('https://example.com/api/publish', { id: postId })
+  if (!res.ok) throw new Error(res.message)          // 抛错 → 保留草稿并返回提示
+  return { postUrl: `https://example.com/p/${postId}` }
+})
+```
+
+`finishWithPublish` 的行为：
+- 未要求发布（`draftOnly !== false`）或平台未声明 `'publish'`：直接返回草稿结果
+- 发布成功：返回 `draftOnly: false` 和线上链接
+- 发布失败：返回 `success: true, draftOnly: true`，`message` 中带失败原因，草稿不会丢失
+
+未声明 `'publish'` 的平台在直接发布模式下会保存草稿，并提示「该平台暂不支持直接发布」。
 
 ## 5. 注册新适配器
 
@@ -367,10 +390,10 @@ import {
 } from '@wechatsync/core'
 
 // 添加到适配器列表
-const ADAPTER_CLASSES = [
+const ADAPTER_CLASSES: AdapterConstructor[] = [
   // ...existing adapters
   NewPlatformAdapter,
-] as const
+]
 ```
 
 ## 6. 常见模式
@@ -449,7 +472,7 @@ async checkAuth(): Promise<AuthResult> {
 | 环境 | 版本要求 |
 |------|---------|
 | Chrome | >= 110 (MV3 支持) |
-| Node.js | >= 18 (MCP Server) |
+| Node.js | >= 20（构建） |
 | TypeScript | >= 5.0 |
 
 ## 9. 参考适配器

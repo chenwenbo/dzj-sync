@@ -4,7 +4,7 @@
 import { CodeAdapter, type ImageUploadResult } from '../code-adapter'
 import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
 import type { PublishOptions } from '../types'
-import { signAWS4, crc32 } from '../../lib'
+import { signAWS4, crc32, buildSummary } from '../../lib'
 import { createLogger } from '../../lib/logger'
 
 const logger = createLogger('Juejin')
@@ -99,7 +99,7 @@ export class JuejinAdapter extends CodeAdapter {
     name: '掘金',
     icon: 'https://lf-web-assets.juejin.cn/obj/juejin-web/xitu_juejin_web/static/favicons/favicon-32x32.png',
     homepage: 'https://juejin.cn',
-    capabilities: ['article', 'draft', 'image_upload', 'categories', 'tags', 'cover'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload', 'categories', 'tags', 'cover'],
   }
 
   /** 预处理配置: 掘金使用 Markdown 格式 */
@@ -205,8 +205,7 @@ export class JuejinAdapter extends CodeAdapter {
       // 1. 获取 CSRF token
       const csrfToken = await this.getCsrfToken()
 
-      // 2. 使用预处理好的 markdown（Content Script 已转换）
-      // 掘金使用 Markdown 格式
+      // 2. 掘金使用 Markdown 格式
       let markdown = article.markdown || ''
 
       // 3. 处理图片（上传到掘金图床）
@@ -222,7 +221,19 @@ export class JuejinAdapter extends CodeAdapter {
         }
       )
 
-      // 6. 创建草稿 (参数来自 DSL juejin.yaml + juejin.transform.ts prepareBody)
+      // 4. 直接发布时需要分类、标签、摘要（掘金要求 50~100 字）、封面
+      //    元信息不满足时仍然保存草稿，只跳过发布
+      let publishMeta = { category_id: '0', tag_ids: [] as string[], brief_content: '', cover_image: '' }
+      let publishBlocker: string | null = null
+      if (this.wantsPublish(options)) {
+        try {
+          publishMeta = await this.resolvePublishMeta(article)
+        } catch (error) {
+          publishBlocker = (error as Error).message
+        }
+      }
+
+      // 5. 创建草稿 (参数来自 DSL juejin.yaml + juejin.transform.ts prepareBody)
       const createResponse = await this.runtime.fetch(
         'https://api.juejin.cn/content_api/v1/article_draft/create',
         {
@@ -233,14 +244,11 @@ export class JuejinAdapter extends CodeAdapter {
             'x-secsdk-csrf-token': csrfToken,
           },
           body: JSON.stringify({
-            brief_content: '',
-            category_id: '0',
-            cover_image: '',
+            ...publishMeta,
             edit_type: 10,
             html_content: 'deprecated',
             link_url: '',
             mark_content: markdown,
-            tag_ids: [],
             title: article.title,
           }),
         }
@@ -275,14 +283,98 @@ export class JuejinAdapter extends CodeAdapter {
 
       const draftUrl = `https://juejin.cn/editor/drafts/${draftId}`
 
-      return this.createResult(true, {
-        postId: draftId,
-        postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+      // 6. 按需直接发布（发布后进入掘金审核）
+      return this.finishWithPublish({ postId: draftId, postUrl: draftUrl }, options, async () => {
+        if (publishBlocker) throw new Error(publishBlocker)
+        const res = await this.runtime.fetch('https://api.juejin.cn/content_api/v1/article/publish', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-secsdk-csrf-token': csrfToken,
+          },
+          body: JSON.stringify({
+            draft_id: draftId,
+            sync_to_org: false,
+            column_ids: [],
+            theme_ids: [],
+          }),
+        })
+        const data = await res.json() as { err_no?: number; err_msg?: string; data?: { article_id?: string } }
+        if (data.err_no || !data.data?.article_id) {
+          throw new Error(data.err_msg || `错误码 ${data.err_no}`)
+        }
+        return {
+          postId: data.data.article_id,
+          postUrl: `https://juejin.cn/post/${data.data.article_id}`,
+          message: '已提交发布，掘金审核通过后可见',
+        }
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  /**
+   * 解析直接发布所需的分类、标签、摘要和封面
+   */
+  private async resolvePublishMeta(article: Article): Promise<{
+    category_id: string
+    tag_ids: string[]
+    brief_content: string
+    cover_image: string
+  }> {
+    // 分类：按名称匹配，未指定或匹配不到时使用「后端」
+    const categories = await this.getCategories()
+    if (categories.length === 0) {
+      throw new Error('获取掘金分类失败')
+    }
+    const wanted = (article.category || '').trim().toLowerCase()
+    const category =
+      categories.find(c => c.name.toLowerCase() === wanted) ||
+      categories.find(c => c.name === '后端') ||
+      categories[0]
+
+    // 标签：掘金要求至少 1 个，最多 3 个
+    const tagIds: string[] = []
+    for (const name of (article.tags || []).slice(0, 3)) {
+      const tagId = await this.searchTagId(name)
+      if (tagId) tagIds.push(tagId)
+    }
+    if (tagIds.length === 0) {
+      throw new Error('掘金发布需要至少一个有效标签，请在 frontmatter 中设置 tags')
+    }
+
+    const brief = buildSummary(article, 100)
+    if (Array.from(brief).length < 50) {
+      throw new Error('掘金要求摘要不少于 50 字，请在 frontmatter 中设置 summary')
+    }
+
+    let cover = ''
+    if (article.cover) {
+      const uploaded = await this.uploadImageByUrl(article.cover)
+      cover = uploaded.url
+    }
+
+    return { category_id: category.id, tag_ids: tagIds, brief_content: brief, cover_image: cover }
+  }
+
+  /**
+   * 按名称搜索掘金标签 ID（优先完全匹配）
+   */
+  private async searchTagId(name: string): Promise<string | null> {
+    const response = await this.runtime.fetch('https://api.juejin.cn/tag_api/v1/query_tag_list', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cursor: '0', key_word: name, limit: 10, sort_type: 1 }),
+    })
+    const data = await response.json() as {
+      data?: Array<{ tag_id: string; tag?: { tag_name?: string } }>
+    }
+    const list = data.data || []
+    const exact = list.find(t => t.tag?.tag_name?.toLowerCase() === name.toLowerCase())
+    return (exact || list[0])?.tag_id ?? null
   }
 
   /**

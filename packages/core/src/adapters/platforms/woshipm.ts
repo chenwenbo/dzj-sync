@@ -112,7 +112,7 @@ export class WoshipmAdapter extends CodeAdapter {
     return this.withHeaderRules(this.HEADER_RULES, async () => {
       logger.info('Starting publish...')
 
-      // 1. 使用预处理好的 HTML（Content Script 已处理代码块、图片、特殊标签等）
+      // 1. 使用预处理好的 HTML（同步页面已处理代码块、特殊标签等）
       // 人人都是产品经理使用 HTML 格式
       let content = article.html || ''
 
@@ -171,7 +171,7 @@ export class WoshipmAdapter extends CodeAdapter {
       return this.createResult(true, {
         postId: draftId,
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,

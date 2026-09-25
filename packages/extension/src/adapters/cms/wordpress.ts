@@ -365,8 +365,8 @@ export async function processArticleImages(
       throw new Error('操作已取消')
     }
 
-    // 跳过空 src 和 data URI
-    if (!src || src.startsWith('data:')) continue
+    // 跳过空 src（data URI 为本地图片，需要上传）
+    if (!src) continue
 
     // 跳过已经是 WordPress 站点的图片
     const wpDomain = new URL(credentials.url).hostname
@@ -387,7 +387,7 @@ export async function processArticleImages(
     let newUrl = uploadedMap.get(src)
 
     if (!newUrl) {
-      logger.debug(` Uploading image ${processed}/${matches.length}: ${src}`)
+      logger.debug(` Uploading image ${processed}/${matches.length}: ${src.substring(0, 100)}`)
       const uploadResult = await uploadImageByUrl(credentials, src, signal)
       if (uploadResult?.url) {
         newUrl = uploadResult.url

@@ -105,20 +105,6 @@ export class ExtensionRuntime implements RuntimeInterface {
   }
 
   /**
-   * 会话存储
-   */
-  session = {
-    async get<T>(key: string): Promise<T | null> {
-      const result = await chrome.storage.session.get(key)
-      return (result[key] as T) ?? null
-    },
-
-    async set<T>(key: string, value: T): Promise<void> {
-      await chrome.storage.session.set({ [key]: value })
-    },
-  }
-
-  /**
    * Header 规则管理 (declarativeNetRequest)
    * 规则只对扩展自身发起的请求生效，不影响其他网页
    */
@@ -170,105 +156,6 @@ export class ExtensionRuntime implements RuntimeInterface {
       await chrome.declarativeNetRequest.updateDynamicRules({
         removeRuleIds: rules.map(r => r.id),
       })
-    },
-  }
-
-  /**
-   * 文件下载
-   * Service Worker 中不支持 URL.createObjectURL，使用 data URL 替代
-   */
-  downloads = {
-    async download(blob: Blob, filename: string, saveAs = true): Promise<number> {
-      // 将 Blob 转换为 data URL
-      const buffer = await blob.arrayBuffer()
-      const base64 = btoa(
-        new Uint8Array(buffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-      )
-      const mimeType = blob.type || 'application/octet-stream'
-      const dataUrl = `data:${mimeType};base64,${base64}`
-
-      const downloadId = await chrome.downloads.download({
-        url: dataUrl,
-        filename,
-        saveAs,
-      })
-      return downloadId
-    },
-  }
-
-  /**
-   * Tab 管理
-   */
-  tabs = {
-    async query(urlPattern: string): Promise<Array<{ id: number; url?: string }>> {
-      const tabs = await chrome.tabs.query({ url: urlPattern })
-      return tabs.filter(t => t.id !== undefined).map(t => ({ id: t.id!, url: t.url }))
-    },
-
-    async create(url: string, active = false): Promise<{ id: number }> {
-      const tab = await chrome.tabs.create({ url, active })
-      return { id: tab.id! }
-    },
-
-    async waitForLoad(tabId: number, timeout = 30000): Promise<void> {
-      return new Promise((resolve, reject) => {
-        const timeoutId = setTimeout(() => {
-          chrome.tabs.onUpdated.removeListener(listener)
-          reject(new Error('Tab load timeout'))
-        }, timeout)
-
-        const listener = (updatedTabId: number, info: chrome.tabs.TabChangeInfo) => {
-          if (updatedTabId === tabId && info.status === 'complete') {
-            clearTimeout(timeoutId)
-            chrome.tabs.onUpdated.removeListener(listener)
-            // 额外等待让页面 JS 初始化
-            setTimeout(resolve, 1000)
-          }
-        }
-        chrome.tabs.onUpdated.addListener(listener)
-      })
-    },
-
-    async executeScript<T, A extends unknown[]>(
-      tabId: number,
-      func: (...args: A) => T | Promise<T>,
-      args: A
-    ): Promise<T> {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId },
-        world: 'MAIN',
-        func: func as (...args: unknown[]) => unknown,
-        args: args as unknown[],
-      })
-
-      const result = results[0]?.result as T
-      return result
-    },
-  }
-
-  /**
-   * DOM 操作 - 通过 Offscreen Document 实现
-   */
-  dom = {
-    parseHTML: async (html: string): Promise<Document> => {
-      const parser = new DOMParser()
-      return parser.parseFromString(html, 'text/html')
-    },
-
-    querySelector: (doc: Document, selector: string): Element | null => {
-      return doc.querySelector(selector)
-    },
-
-    querySelectorAll: (doc: Document, selector: string): Element[] => {
-      return Array.from(doc.querySelectorAll(selector))
-    },
-
-    getTextContent: (element: Element): string => {
-      return element.textContent || ''
-    },
-
-    getInnerHTML: (element: Element): string => {
-      return element.innerHTML
     },
   }
 }

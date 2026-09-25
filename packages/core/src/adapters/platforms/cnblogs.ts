@@ -14,7 +14,7 @@ export class CnblogsAdapter extends CodeAdapter {
     name: '博客园',
     icon: 'https://www.cnblogs.com/favicon.ico',
     homepage: 'https://www.cnblogs.com',
-    capabilities: ['article', 'draft', 'image_upload'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload'],
   }
 
   /** 预处理配置: 博客园使用 Markdown 格式 */
@@ -157,93 +157,113 @@ export class CnblogsAdapter extends CodeAdapter {
       logger.debug('Request headers:', JSON.stringify(headers))
       logger.debug('Markdown content length:', markdown.length)
 
-      // 4. 创建草稿
-      const response = await this.runtime.fetch('https://i.cnblogs.com/api/posts', {
-        method: 'POST',
-        credentials: 'include',
-        headers,
-        body: JSON.stringify({
-          id: null,
-          postType: 2, // 2 = 文章, 1 = 随笔
-          accessPermission: 0,
-          title: article.title,
-          url: null,
-          postBody: markdown,
-          categoryIds: null,
-          categories: null,
-          collectionIds: [],
-          inSiteCandidate: false,
-          inSiteHome: false,
-          siteCategoryId: null,
-          blogTeamIds: null,
-          isPublished: false,
-          displayOnHomePage: false,
-          isAllowComments: true,
-          includeInMainSyndication: false,
-          isPinned: false,
-          showBodyWhenPinned: false,
-          isOnlyForRegisterUser: false,
-          isUpdateDateAdded: false,
-          entryName: null,
-          description: null,
-          featuredImage: null,
-          tags: null,
-          password: null,
-          publishAt: null,
-          datePublished: new Date().toISOString(),
-          dateUpdated: null,
-          isMarkdown: true,
-          isDraft: true,
-          autoDesc: null,
-          changePostType: false,
-          blogId: 0,
-          author: null,
-          removeScript: false,
-          clientInfo: null,
-          changeCreatedTime: false,
-          canChangeCreatedTime: false,
-          isContributeToImpressiveBugActivity: false,
-          usingEditorId: 5,
-          sourceUrl: null,
-        }),
-      })
-
-      // 检查响应
-      const responseText = await response.text()
-      logger.debug('Create post response:', response.status, responseText.substring(0, 300))
-
-      if (!response.ok) {
-        // 检查是否是认证错误
-        if (response.status === 401 || response.status === 403) {
-          throw new Error('未登录或登录已过期，请重新登录博客园')
-        }
-        throw new Error(`创建草稿失败: ${response.status} - ${responseText}`)
+      // 4. 创建草稿（直接发布时使用「随笔」类型，发布后展示在博客首页）
+      const publishing = this.wantsPublish(options)
+      const postBody = {
+        id: null as number | null,
+        postType: publishing ? 1 : 2, // 1 = 随笔, 2 = 文章
+        accessPermission: 0,
+        title: article.title,
+        url: null,
+        postBody: markdown,
+        categoryIds: null,
+        categories: null,
+        collectionIds: [],
+        inSiteCandidate: false,
+        inSiteHome: false,
+        siteCategoryId: null,
+        blogTeamIds: null,
+        isPublished: false,
+        displayOnHomePage: publishing,
+        isAllowComments: true,
+        includeInMainSyndication: publishing,
+        isPinned: false,
+        showBodyWhenPinned: false,
+        isOnlyForRegisterUser: false,
+        isUpdateDateAdded: false,
+        entryName: null,
+        description: publishing && article.summary ? article.summary : null,
+        featuredImage: null,
+        tags: publishing && article.tags && article.tags.length > 0 ? article.tags : null,
+        password: null,
+        publishAt: null,
+        datePublished: new Date().toISOString(),
+        dateUpdated: null,
+        isMarkdown: true,
+        isDraft: true,
+        autoDesc: null,
+        changePostType: false,
+        blogId: 0,
+        author: null,
+        removeScript: false,
+        clientInfo: null,
+        changeCreatedTime: false,
+        canChangeCreatedTime: false,
+        isContributeToImpressiveBugActivity: false,
+        usingEditorId: 5,
+        sourceUrl: null,
       }
 
-      let responseData: { id?: number; blogId?: number; error?: string }
-      try {
-        responseData = JSON.parse(responseText)
-      } catch {
-        throw new Error(`创建草稿失败: 响应不是有效 JSON - ${responseText.substring(0, 100)}`)
-      }
-
-      if (!responseData.id) {
-        throw new Error(responseData.error || '创建草稿失败: 无效响应')
-      }
-
-      const postId = String(responseData.id)
-      const draftUrl = `https://i.cnblogs.com/articles/edit;postId=${postId}`
+      const draft = await this.savePost(headers, postBody)
+      const postId = String(draft.id)
+      const draftUrl = `https://i.cnblogs.com/${publishing ? 'posts' : 'articles'}/edit;postId=${postId}`
 
       logger.debug('Draft created:', postId)
 
-      return this.createResult(true, {
-        postId,
-        postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+      // 5. 按需直接发布：带上 id 再保存一次，并标记为已发布
+      return this.finishWithPublish({ postId, postUrl: draftUrl }, options, async () => {
+        const published = await this.savePost(headers, {
+          ...postBody,
+          id: draft.id,
+          blogId: draft.blogId ?? 0,
+          isPublished: true,
+          isDraft: false,
+        })
+        const url = published.url
+          ? (published.url.startsWith('//') ? `https:${published.url}` : published.url)
+          : `https://i.cnblogs.com/posts/edit;postId=${postId}`
+        return { postId, postUrl: url }
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  /**
+   * 创建 / 更新博客园文章
+   */
+  private async savePost(
+    headers: Record<string, string>,
+    body: Record<string, unknown>
+  ): Promise<{ id: number; blogId?: number; url?: string }> {
+    const response = await this.runtime.fetch('https://i.cnblogs.com/api/posts', {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify(body),
+    })
+
+    const responseText = await response.text()
+    logger.debug('Save post response:', response.status, responseText.substring(0, 300))
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new Error('未登录或登录已过期，请重新登录博客园')
+      }
+      throw new Error(`保存失败: ${response.status} - ${responseText.substring(0, 200)}`)
+    }
+
+    let data: { id?: number; blogId?: number; url?: string; error?: string }
+    try {
+      data = JSON.parse(responseText)
+    } catch {
+      throw new Error(`保存失败: 响应不是有效 JSON - ${responseText.substring(0, 100)}`)
+    }
+
+    if (!data.id) {
+      throw new Error(data.error || '保存失败: 无效响应')
+    }
+    return { id: data.id, blogId: data.blogId, url: data.url }
   }
 
   /**

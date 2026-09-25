@@ -158,7 +158,7 @@ export class BaijiahaoAdapter extends CodeAdapter {
       return this.createResult(true, {
         postId: postId,
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,

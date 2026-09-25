@@ -186,7 +186,7 @@ export class DoubanAdapter extends CodeAdapter {
       return this.createResult(true, {
         postId: this.formData!.note_id,
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,

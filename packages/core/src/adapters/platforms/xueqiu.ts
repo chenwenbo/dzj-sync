@@ -209,7 +209,7 @@ export class XueqiuAdapter extends CodeAdapter {
       return this.createResult(true, {
         postId: String(postId),
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,

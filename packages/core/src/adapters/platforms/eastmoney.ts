@@ -182,7 +182,7 @@ export class EastmoneyAdapter extends CodeAdapter {
       return this.createResult(true, {
         postId: draftId,
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
       });
     }).catch((error) =>
       this.createResult(false, {

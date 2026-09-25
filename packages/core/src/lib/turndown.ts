@@ -5,7 +5,7 @@
  * 移植自旧版 @wechatsync/drivers/tools/turnDownExtend.js
  *
  * 架构说明:
- * - htmlToMarkdownNative: 使用原生 DOM，适用于 Content Script（推荐）
+ * - htmlToMarkdownNative: 使用原生 DOM，适用于有 DOM 的页面环境（推荐）
  * - htmlToMarkdown: 使用正则转换，适用于 Service Worker（回退方案）
  */
 
@@ -835,7 +835,7 @@ export { TurndownService }
 
 /**
  * HTML 转 Markdown（使用原生 DOM）
- * 适用于 Content Script / 页面环境，利用浏览器原生 DOM
+ * 适用于页面环境，利用浏览器原生 DOM
  * 比 linkedom 兼容性更好，转换质量更高
  */
 export function htmlToMarkdownNative(html: string, options: TurndownOptions = {}): string {

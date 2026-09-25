@@ -139,7 +139,7 @@ export class BilibiliAdapter extends CodeAdapter {
       return this.createResult(true, {
         postId: String(res.data.aid),
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,

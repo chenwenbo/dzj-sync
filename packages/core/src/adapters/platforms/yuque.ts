@@ -25,7 +25,7 @@ export class YuqueAdapter extends CodeAdapter {
     name: '语雀',
     icon: 'https://gw.alipayobjects.com/zos/rmsportal/UTjFYEzMSYVwzxIGVhMu.png',
     homepage: 'https://www.yuque.com/dashboard',
-    capabilities: ['article', 'draft', 'image_upload'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload'],
   }
 
   /** 预处理配置: 语雀使用 Markdown 格式 (转换为 lake) */
@@ -219,10 +219,29 @@ export class YuqueAdapter extends CodeAdapter {
 
       const draftUrl = `https://www.yuque.com/go/doc/${postId}/edit`
 
-      return this.createResult(true, {
-        postId: String(postId),
-        postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+      // 按需直接发布（语雀文档发布后知识库成员/读者可见）
+      return this.finishWithPublish({ postId: String(postId), postUrl: draftUrl }, options, async () => {
+        const response = await this.runtime.fetch(`https://www.yuque.com/api/docs/${postId}/publish`, {
+          method: 'PUT',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-csrf-token': this.csrfToken,
+          },
+          body: JSON.stringify({ force: false }),
+        })
+        const text = await response.text()
+        logger.debug('Publish response:', response.status, text.substring(0, 300))
+        if (!response.ok) {
+          let message = `HTTP ${response.status}`
+          try {
+            message = (JSON.parse(text) as { message?: string }).message || message
+          } catch {
+            // 非 JSON 响应
+          }
+          throw new Error(message)
+        }
+        return { postId: String(postId), postUrl: `https://www.yuque.com/go/doc/${postId}` }
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,

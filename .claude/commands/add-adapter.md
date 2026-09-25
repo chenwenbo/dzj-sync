@@ -13,10 +13,10 @@
 ## 执行步骤
 
 1. 创建 `packages/core/src/adapters/platforms/{id}.ts`
-2. 参考 `docs/adapter-spec.md` 实现必要方法
+2. 参考 `docs/adapter-spec.md` 实现必要方法；如平台支持直接发布，声明 `'publish'` 能力并用 `finishWithPublish` 完成发布（见 4.5 节）
 3. 在 `packages/core/src/adapters/platforms/index.ts` 导出
 4. 在 `packages/extension/src/adapters/index.ts` 注册
-5. 运行 `pnpm build` 验证
+5. 运行 `pnpm typecheck && pnpm test && pnpm build` 验证
 
 ## 适配器模板
 

@@ -9,7 +9,7 @@ export type OutputFormat = 'html' | 'markdown'
 /**
  * 预处理配置
  * 每个平台在 adapter 中定义自己需要的预处理选项
- * Content Script 根据这些配置在发送到 Service Worker 前进行预处理
+ * 同步页面根据这些配置在发送到 Service Worker 前进行预处理
  */
 export interface PreprocessConfig {
   /** 输出格式: html 或 markdown */
@@ -107,7 +107,10 @@ export type ImageProgressCallback = (current: number, total: number) => void
  * 发布选项
  */
 export interface PublishOptions {
-  /** 只保存草稿，不发布 */
+  /**
+   * 只保存草稿，不发布（默认 true）
+   * 设为 false 时，支持 'publish' 能力的平台会在保存草稿后直接发布
+   */
   draftOnly?: boolean
   /** 图片上传进度回调 */
   onImageProgress?: ImageProgressCallback
@@ -120,7 +123,7 @@ export interface PlatformAdapter {
   /** 平台元信息 */
   readonly meta: PlatformMeta
 
-  /** 预处理配置 (Content Script 根据此配置预处理内容) */
+  /** 预处理配置 (同步页面根据此配置预处理内容) */
   readonly preprocessConfig?: Partial<PreprocessConfig>
 
   /** 初始化适配器 */
@@ -172,6 +175,6 @@ export interface Draft {
 export interface AdapterRegistryEntry {
   meta: PlatformMeta
   factory: (runtime: RuntimeInterface) => PlatformAdapter
-  /** 预处理配置 (Content Script 根据此配置预处理内容) */
+  /** 预处理配置 (同步页面根据此配置预处理内容) */
   preprocessConfig?: Partial<PreprocessConfig>
 }

@@ -12,6 +12,6 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
-  "include": ["src/**/*", "platforms/**/*"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }
