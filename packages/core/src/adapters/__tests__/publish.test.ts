@@ -149,7 +149,7 @@ describe('CSDN', () => {
     const saves = calls.filter(c => c.url.includes('saveArticle'))
     expect(saves).toHaveLength(2)
     expect(saves[0].body).toMatchObject({ status: 2, pubStatus: 'draft' })
-    expect(saves[1].body).toMatchObject({ id: '42', status: 0, pubStatus: 'publish', tags: 'JavaScript' })
+    expect(saves[1].body).toMatchObject({ id: '42', status: 1, pubStatus: 'publish', tags: 'JavaScript' })
   })
 
   it('only saves once in draft mode', async () => {
@@ -163,14 +163,35 @@ describe('CSDN', () => {
 // ============ 知乎 ============
 
 describe('Zhihu', () => {
+  const baseRoute = (publishV4: () => Response): Route => (url, init) => {
+    if (url.endsWith('/api/articles/drafts')) return json({ id: '123' })
+    if (url.endsWith('/api/articles/123/draft')) return new Response(null, { status: 204 })
+    if (url.includes('/api/autocomplete/topics')) return json([{ id: 't1', name: 'JavaScript' }])
+    if (url.endsWith('/api/articles/123/topics')) return json({})
+    if (url.includes('/api/v4/content/publish')) return publishV4()
+    if (url.endsWith('/api/articles/123/publish') && init.method === 'PUT') return json({})
+    return undefined
+  }
+
+  it('adds topics from tags and publishes via the creator API with xsrf token', async () => {
+    const { runtime, calls } = createRuntime(
+      baseRoute(() => json({ code: 0, message: 'success', data: { result: '{"publish":{"id":"123"}}' } })),
+      { _xsrf: 'xsrf-token' }
+    )
+    const adapter = new ZhihuAdapter()
+    await adapter.init(runtime)
+    const result = await adapter.publish(article, { draftOnly: false })
+    expect(result).toMatchObject({ success: true, draftOnly: false, postUrl: 'https://zhuanlan.zhihu.com/p/123' })
+
+    const topic = calls.find(c => c.url.endsWith('/api/articles/123/topics'))!
+    expect(topic.body).toEqual({ id: 't1', name: 'JavaScript' })
+    const publish = calls.find(c => c.url.includes('/api/v4/content/publish'))!
+    expect(publish.body.data.draft.id).toBe('123')
+    expect(calls.some(c => c.url.endsWith('/api/articles/123/publish'))).toBe(false)
+  })
+
   it('falls back to the legacy publish endpoint', async () => {
-    const { adapter, calls } = await setup(new ZhihuAdapter(), (url, init) => {
-      if (url.endsWith('/api/articles/drafts')) return json({ id: '123' })
-      if (url.endsWith('/api/articles/123/draft')) return new Response(null, { status: 204 })
-      if (url.includes('/api/v4/content/publish')) return json({ error: { message: 'bad' } }, { status: 400 })
-      if (url.endsWith('/api/articles/123/publish') && init.method === 'PUT') return json({})
-      return undefined
-    })
+    const { adapter, calls } = await setup(new ZhihuAdapter(), baseRoute(() => json({ error: { message: 'bad' } }, { status: 400 })))
     const result = await adapter.publish(article, { draftOnly: false })
     expect(result).toMatchObject({ success: true, draftOnly: false, postUrl: 'https://zhuanlan.zhihu.com/p/123' })
     expect(calls.map(c => c.method + ' ' + c.url).filter(c => c.includes('publish'))).toHaveLength(2)

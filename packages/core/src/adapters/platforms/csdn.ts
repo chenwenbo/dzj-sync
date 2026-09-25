@@ -230,6 +230,7 @@ export class CSDNAdapter extends CodeAdapter {
         vote_id: 0,
         resource_id: '',
         pubStatus: 'draft',
+        creation_statement: 0,
         creator_activity_id: '',
       }
 
@@ -266,7 +267,8 @@ export class CSDNAdapter extends CodeAdapter {
           cover_images: coverImages,
           cover_type: coverImages.length > 0 ? 1 : 0,
           is_new: 0,
-          status: 0,
+          // 发布：status=1 + pubStatus=publish（草稿为 status=2 + pubStatus=draft，参考 csdn-mcp）
+          status: 1,
           pubStatus: 'publish',
         })
         if (!published.id) {

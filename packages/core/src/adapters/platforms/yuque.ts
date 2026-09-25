@@ -228,7 +228,8 @@ export class YuqueAdapter extends CodeAdapter {
             'Content-Type': 'application/json',
             'x-csrf-token': this.csrfToken,
           },
-          body: JSON.stringify({ force: false }),
+          // 与语雀网页编辑器一致的发布参数（参考 yuque-skill）
+          body: JSON.stringify({ force: false, notify: false, cover: null, ignoreGlobalMessage: true }),
         })
         const text = await response.text()
         logger.debug('Publish response:', response.status, text.substring(0, 300))

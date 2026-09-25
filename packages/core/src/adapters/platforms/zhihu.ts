@@ -180,7 +180,7 @@ export class ZhihuAdapter extends CodeAdapter {
 
       // 6. 按需直接发布
       return this.finishWithPublish({ postId: draftId, postUrl: draftUrl }, options, async () => {
-        await this.publishDraft(draftId)
+        await this.publishDraft(draftId, article.tags || [])
         return { postId: draftId, postUrl: `https://zhuanlan.zhihu.com/p/${draftId}` }
       })
     }).catch((error) => this.createResult(false, {
@@ -189,10 +189,60 @@ export class ZhihuAdapter extends CodeAdapter {
   }
 
   /**
-   * 发布草稿
-   * 优先使用创作中心的新接口，失败时回退到专栏旧接口
+   * 读取 _xsrf Cookie（发布相关接口需要 x-xsrftoken 请求头）
    */
-  private async publishDraft(draftId: string): Promise<void> {
+  private async getXsrfToken(): Promise<string> {
+    if (this.runtime.getCookie) {
+      for (const domain of ['.zhihu.com', 'www.zhihu.com', 'zhihu.com']) {
+        const value = await this.runtime.getCookie(domain, '_xsrf')
+        if (value) return value
+      }
+    }
+    return ''
+  }
+
+  /**
+   * 为文章添加话题（知乎通常要求至少一个话题才能发表）
+   * 按标签名自动补全，取第一个匹配的话题
+   */
+  private async addTopics(draftId: string, tags: string[], xsrf: string): Promise<number> {
+    let added = 0
+    for (const tag of tags.slice(0, 3)) {
+      try {
+        const res = await this.runtime.fetch(
+          `https://zhuanlan.zhihu.com/api/autocomplete/topics?token=${encodeURIComponent(tag)}&max_matches=5&use_similar=0&topic_filter=1`,
+          { method: 'GET', credentials: 'include', headers: { 'x-requested-with': 'fetch' } }
+        )
+        const topics = await res.json() as unknown
+        if (!Array.isArray(topics) || topics.length === 0) continue
+
+        const addRes = await this.runtime.fetch(`https://zhuanlan.zhihu.com/api/articles/${draftId}/topics`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-requested-with': 'fetch',
+            'x-xsrftoken': xsrf,
+          },
+          body: JSON.stringify(topics[0]),
+        })
+        if (addRes.ok) added++
+      } catch (error) {
+        logger.warn('Add topic failed:', tag, error)
+      }
+    }
+    return added
+  }
+
+  /**
+   * 发布草稿
+   * 使用创作中心接口 /api/v4/content/publish（参考 zhihu_obsidian、zhihu-cli 的实现），
+   * 失败时回退到专栏旧接口
+   */
+  private async publishDraft(draftId: string, tags: string[]): Promise<void> {
+    const xsrf = await this.getXsrfToken()
+    const topicCount = await this.addTopics(draftId, tags, xsrf)
+
     const settings = {
       column: null,
       commentPermission: 'anyone',
@@ -206,7 +256,6 @@ export class ZhihuAdapter extends CodeAdapter {
 
     const errors: string[] = []
 
-    // 新接口（知乎网页编辑器当前使用）
     try {
       const response = await this.runtime.fetch('https://www.zhihu.com/api/v4/content/publish', {
         method: 'POST',
@@ -214,6 +263,7 @@ export class ZhihuAdapter extends CodeAdapter {
         headers: {
           'Content-Type': 'application/json',
           'x-requested-with': 'fetch',
+          'x-xsrftoken': xsrf,
         },
         body: JSON.stringify({
           action: 'article',
@@ -235,15 +285,16 @@ export class ZhihuAdapter extends CodeAdapter {
       })
       const text = await response.text()
       logger.debug('Publish (v4) response:', response.status, text.substring(0, 300))
-      if (response.ok) {
-        const data = text ? JSON.parse(text) as { code?: number; error?: { message?: string }; message?: string } : {}
-        if (!data.error && (data.code === undefined || data.code === 0)) {
-          return
-        }
-        errors.push(data.error?.message || data.message || `code ${data.code}`)
-      } else {
-        errors.push(`HTTP ${response.status}`)
+      let data: { code?: number; message?: string; error?: { message?: string } } = {}
+      try {
+        data = text ? JSON.parse(text) : {}
+      } catch {
+        // 非 JSON 响应
       }
+      if (response.ok && (data.message === 'success' || (data.code === 0 && !data.error))) {
+        return
+      }
+      errors.push(data.error?.message || data.message || `HTTP ${response.status}`)
     } catch (error) {
       errors.push((error as Error).message)
     }
@@ -257,6 +308,7 @@ export class ZhihuAdapter extends CodeAdapter {
         headers: {
           'Content-Type': 'application/json',
           'x-requested-with': 'fetch',
+          'x-xsrftoken': xsrf,
         },
         body: JSON.stringify(settings),
       }
@@ -275,6 +327,9 @@ export class ZhihuAdapter extends CodeAdapter {
       // 非 JSON 响应
     }
     errors.push(message)
+    if (topicCount === 0) {
+      errors.push('知乎通常要求至少一个话题，请在 frontmatter 的 tags 中填写话题')
+    }
     throw new Error(errors.join('；'))
   }
 
