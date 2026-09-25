@@ -4,13 +4,14 @@
  */
 import { CodeAdapter, ImageUploadResult } from '../code-adapter'
 import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
+import type { PublishOptions } from '../types'
 export class OschinaAdapter extends CodeAdapter {
   meta: PlatformMeta = {
     id: 'oschina',
     name: '开源中国',
     icon: 'https://www.oschina.net/favicon.ico',
     homepage: 'https://my.oschina.net',
-    capabilities: ['article', 'draft', 'image_upload'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload'],
   }
 
   /** 预处理配置: 开源中国使用 Markdown 格式 */
@@ -119,10 +120,11 @@ export class OschinaAdapter extends CodeAdapter {
 
   /**
    * 发布文章
+   *
+   * 1. POST /api/draft/save_draft 保存草稿（默认只做这一步）
+   * 2. draftOnly === false 时，再 POST /blog/web/add 发布博客
    */
-  async publish(article: Article): Promise<SyncResult> {
-    const now = Date.now()
-
+  async publish(article: Article, options?: PublishOptions): Promise<SyncResult> {
     return this.withHeaderRules(this.HEADER_RULES, async () => {
       // 确保已获取用户 ID
       if (!this.userId) {
@@ -171,20 +173,105 @@ export class OschinaAdapter extends CodeAdapter {
       }
 
       const draftId = String(res.result.id)
+      const draftUrl = `https://my.oschina.net/u/${this.userId}/blog/write/draft/${draftId}`
 
-      return {
-        platform: this.meta.id,
-        success: true,
-        postId: draftId,
-        postUrl: `https://my.oschina.net/u/${this.userId}/blog/write/draft/${draftId}`,
-        draftOnly: true,
-        timestamp: now,
-      }
-    }).catch((error) => ({
-      platform: this.meta.id,
-      success: false,
+      return this.finishWithPublish({ postId: draftId, postUrl: draftUrl }, options, async () => {
+        const blogId = await this.publishBlog(article, content, useMarkdown)
+        return { postId: blogId, postUrl: `https://my.oschina.net/u/${this.userId}/blog/${blogId}` }
+      })
+    }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
-      timestamp: now,
     }))
+  }
+
+  /**
+   * 选择博客分类（目录）ID
+   *
+   * GET /oschinapi/blog_catalog/list_by_user → { result: [{ id, name, blogCount }] }
+   * - frontmatter category 与某个分类同名时使用该分类
+   * - 否则默认使用文章数最多的分类（通常是用户的主力分类）
+   * 开源中国 2026-05 改版后发布接口的 catalog 为必填，传 0 会被拒绝。
+   */
+  private async resolveCatalogId(category?: string): Promise<number | string> {
+    const response = await this.runtime.fetch(
+      'https://apiv1.oschina.net/oschinapi/blog_catalog/list_by_user',
+      {
+        credentials: 'include',
+        headers: { Accept: 'application/json' },
+      }
+    )
+    const data = await response.json() as {
+      result?: Array<{ id: number | string; name?: string; blogCount?: number }>
+      message?: string
+    }
+    const list = Array.isArray(data?.result) ? data.result : []
+    if (list.length === 0) {
+      throw new Error('未获取到开源中国博客分类，请先在开源中国博客中创建一个分类')
+    }
+
+    const wanted = category?.trim()
+    if (wanted) {
+      const hit = list.find(c => c.name?.trim() === wanted)
+      if (hit) return hit.id
+    }
+
+    const best = list.reduce((a, b) => ((b.blogCount || 0) > (a.blogCount || 0) ? b : a), list[0])
+    return best.id
+  }
+
+  /**
+   * 发布博客
+   *
+   * POST https://apiv1.oschina.net/oschinapi/blog/web/add（Cookie 认证）
+   * body: { title, content, contentType, type, originUrl, catalog, privacy, disableComment, user }
+   * - contentType: 1 = Markdown, 0 = HTML（注意与草稿接口的 2 = HTML 不同）
+   * - type: '1' 原创（默认）
+   * - privacy: true 表示「公开」；disableComment: false 允许评论
+   * 成功响应 { code: 200, result: blogId }，文章链接为 https://my.oschina.net/u/{uid}/blog/{blogId}
+   * 发布接口不接受草稿 ID，因此重新提交完整内容，之前保存的草稿会保留在草稿箱中。
+   * 参考：https://github.com/addozhang/omnipub/blob/main/extension/content-scripts/publishers/oschina.js
+   */
+  private async publishBlog(article: Article, content: string, useMarkdown: boolean): Promise<string> {
+    const catalog = await this.resolveCatalogId(article.category)
+
+    const response = await this.runtime.fetch('https://apiv1.oschina.net/oschinapi/blog/web/add', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        title: article.title,
+        content,
+        contentType: useMarkdown ? 1 : 0,
+        type: '1',
+        originUrl: '',
+        catalog,
+        privacy: true,
+        disableComment: false,
+        user: Number(this.userId),
+      }),
+    })
+
+    let res: {
+      success?: boolean
+      code?: number
+      message?: string
+      result?: number | string | { id?: number | string }
+    }
+    try {
+      res = await response.json()
+    } catch {
+      throw new Error(`发布接口返回异常（HTTP ${response.status}）`)
+    }
+
+    const result = res?.result
+    const blogId = typeof result === 'object' && result !== null ? result.id : result
+    const ok = res?.code === 200 || res?.success === true
+    if (!ok || blogId === undefined || blogId === null || blogId === '') {
+      throw new Error(res?.message || `发布失败（code=${res?.code ?? response.status}）`)
+    }
+    return String(blogId)
   }
 }

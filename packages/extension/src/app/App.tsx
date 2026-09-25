@@ -330,7 +330,7 @@ export default function App() {
             )}
             {mode === 'publish' && (
               <p className="text-xs text-muted-foreground">
-                发布失败时会保留草稿并提示原因；掘金、CSDN 发布后需平台审核。
+                发布失败时会保留草稿并提示原因；掘金、CSDN、B站、百家号等发布后需平台审核；公众号需在后台关闭「群发消息保护」。
               </p>
             )}
 

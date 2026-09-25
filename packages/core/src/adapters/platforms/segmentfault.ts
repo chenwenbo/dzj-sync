@@ -4,13 +4,14 @@
  */
 import { CodeAdapter, ImageUploadResult } from '../code-adapter'
 import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
+import type { PublishOptions } from '../types'
 export class SegmentfaultAdapter extends CodeAdapter {
   meta: PlatformMeta = {
     id: 'segmentfault',
     name: '思否',
     icon: 'https://imgcache.iyiou.com/Company/2016-05-11/cf-segmentfault.jpg',
     homepage: 'https://segmentfault.com/user/draft',
-    capabilities: ['article', 'draft', 'image_upload'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload'],
   }
 
   /** 预处理配置: 思否使用 Markdown 格式 */
@@ -158,9 +159,11 @@ export class SegmentfaultAdapter extends CodeAdapter {
 
   /**
    * 发布文章
+   *
+   * 1. POST /gateway/draft 保存草稿（默认只做这一步）
+   * 2. draftOnly === false 时，再 POST /gateway/article 把草稿发布出去
    */
-  async publish(article: Article): Promise<SyncResult> {
-    const now = Date.now()
+  async publish(article: Article, options?: PublishOptions): Promise<SyncResult> {
     return this.withHeaderRules(this.HEADER_RULES, async () => {
       // 获取 session token
       this.sessionToken = await this.getSessionToken()
@@ -177,68 +180,159 @@ export class SegmentfaultAdapter extends CodeAdapter {
         type: 'article',
       }
 
-      const response = await this.runtime.fetch('https://segmentfault.com/gateway/draft', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          token: this.sessionToken,
-          accept: '*/*',
-        },
-        body: JSON.stringify(postData),
-      })
+      const res = await this.gatewayPost('https://segmentfault.com/gateway/draft', postData)
 
-      // 处理异常响应
-      const text = await response.text()
-      if (text === 'Unauthorized' || text.includes('禁言') || text.includes('锁定')) {
-        throw new Error(text === 'Unauthorized' ? '未授权' : text)
-      }
-
-      let res
-      try {
-        res = JSON.parse(text)
-      } catch {
-        throw new Error('发布失败: ' + text)
-      }
-
-      // 处理数组格式响应 [1, "error_message"]
+      // 处理数组格式响应 [1, "error_message"] / [0, data]
+      let draftId: string | undefined
       if (Array.isArray(res)) {
         if (res[0] === 1) {
           throw new Error(res[1] || '发布失败')
         }
-        // [0, data] 成功格式
-        const data = res[1]
-        if (data?.id) {
-          return {
-            platform: this.meta.id,
-            success: true,
-            postId: data.id,
-            postUrl: `https://segmentfault.com/write?draftId=${data.id}`,
-            draftOnly: true,
-            timestamp: now,
-          }
+        if (res[1]?.id) draftId = String(res[1].id)
+      }
+
+      if (!draftId) {
+        if (!res.id) {
+          // 尝试多种错误字段
+          const errorMsg = res.message || res.msg || res.error || res.errMsg || JSON.stringify(res)
+          throw new Error(errorMsg)
         }
+        draftId = String(res.id)
       }
 
-      if (!res.id) {
-        // 尝试多种错误字段
-        const errorMsg = res.message || res.msg || res.error || res.errMsg || JSON.stringify(res)
-        throw new Error(errorMsg)
-      }
+      const draftUrl = `https://segmentfault.com/write?draftId=${draftId}`
 
-      return {
-        platform: this.meta.id,
-        success: true,
-        postId: res.id,
-        postUrl: `https://segmentfault.com/write?draftId=${res.id}`,
-        draftOnly: true,
-        timestamp: now,
-      }
-    }).catch((error) => ({
-      platform: this.meta.id,
-      success: false,
+      return this.finishWithPublish({ postId: draftId, postUrl: draftUrl }, options, async () => {
+        const articleId = await this.publishDraft(article, content, draftId!)
+        return { postId: articleId, postUrl: `https://segmentfault.com/a/${articleId}` }
+      })
+    }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
-      timestamp: now,
     }))
+  }
+
+  /**
+   * 调用思否 gateway 接口（JSON），统一处理未授权 / 禁言等纯文本响应
+   */
+  private async gatewayPost(url: string, body: unknown): Promise<any> {
+    const response = await this.runtime.fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        token: this.sessionToken || '',
+        accept: '*/*',
+      },
+      body: JSON.stringify(body),
+    })
+
+    // 处理异常响应
+    const text = await response.text()
+    if (text === 'Unauthorized' || text.includes('禁言') || text.includes('锁定')) {
+      throw new Error(text === 'Unauthorized' ? '未授权' : text)
+    }
+
+    try {
+      return JSON.parse(text)
+    } catch {
+      throw new Error('发布失败: ' + text)
+    }
+  }
+
+  /**
+   * 把标签名解析为思否标签 ID
+   *
+   * GET /gateway/tags?query=search&q=<name> → { rows: [{ id, name }] }
+   * 优先取名称完全一致（忽略大小写）的标签，否则取搜索结果第一条。
+   */
+  private async resolveTagIds(names: string[]): Promise<{ ids: string[]; missing: string[] }> {
+    const ids: string[] = []
+    const missing: string[] = []
+
+    for (const name of names) {
+      const response = await this.runtime.fetch(
+        `https://segmentfault.com/gateway/tags?query=search&q=${encodeURIComponent(name)}`,
+        {
+          credentials: 'include',
+          headers: { token: this.sessionToken || '', accept: '*/*' },
+        }
+      )
+      let rows: Array<{ id?: string | number; name?: string }> = []
+      try {
+        const data = await response.json() as { rows?: typeof rows }
+        rows = Array.isArray(data?.rows) ? data.rows : []
+      } catch {
+        rows = []
+      }
+      const lower = name.toLowerCase()
+      const hit = rows.find(r => r.name?.toLowerCase() === lower) || rows[0]
+      if (hit?.id != null) {
+        const id = String(hit.id)
+        if (!ids.includes(id)) ids.push(id)
+      } else {
+        missing.push(name)
+      }
+    }
+
+    return { ids, missing }
+  }
+
+  /**
+   * 发布草稿
+   *
+   * POST https://segmentfault.com/gateway/article （header: token）
+   * body: { tags: [tagId], title, text, draft_id, blog_id: '0', type, url, cover, license, log }
+   * - type: 1 原创 / 2 转载 / 3 翻译，默认 1（原创）
+   * - blog_id: '0' 表示不投稿到专栏
+   * - license: 1（沿用编辑器默认的版权声明）
+   * 成功返回 HTTP 201，文章 ID 在 id 或 data.id；文章链接为 https://segmentfault.com/a/{id}
+   * 参考：https://github.com/AndrewAndrea/FreeOpenWrite/blob/master/app_doc/spider/segfault_publish.py
+   */
+  private async publishDraft(article: Article, content: string, draftId: string): Promise<string> {
+    // 思否发布文章至少需要 1 个标签，最多 5 个
+    const tagNames = (article.tags || []).map(t => t.trim()).filter(Boolean).slice(0, 5)
+    if (tagNames.length === 0) {
+      throw new Error('思否发布文章至少需要 1 个标签，请在 frontmatter 中设置 tags')
+    }
+
+    const { ids: tagIds, missing } = await this.resolveTagIds(tagNames)
+    if (tagIds.length === 0) {
+      throw new Error(`思否未找到标签「${missing.join('、')}」，请在 frontmatter 的 tags 中使用思否已有的标签`)
+    }
+
+    // 封面：可选，上传到思否图床后使用；上传失败不影响发布
+    let cover = ''
+    if (article.cover) {
+      try {
+        cover = (await this.uploadImageByUrl(article.cover)).url
+      } catch {
+        cover = ''
+      }
+    }
+
+    const res = await this.gatewayPost('https://segmentfault.com/gateway/article', {
+      tags: tagIds,
+      title: article.title,
+      text: content,
+      draft_id: draftId,
+      blog_id: '0',
+      type: 1,
+      url: '',
+      cover,
+      license: 1,
+      log: '',
+    })
+
+    if (Array.isArray(res)) {
+      if (res[0] === 1) throw new Error(res[1] || '发布失败')
+      if (res[1]?.id) return String(res[1].id)
+    }
+
+    const id = res?.data?.id ?? res?.id
+    if (!id) {
+      const errorMsg = res?.message || res?.msg || res?.error || res?.errMsg || JSON.stringify(res)
+      throw new Error(errorMsg)
+    }
+    return String(id)
   }
 }

@@ -141,17 +141,17 @@ export function DocEditor({ doc, onChange }: { doc: MarkdownDoc; onChange: (meta
         <input className="input" value={doc.meta.title} onChange={set('title')} />
       </Field>
       <div className="grid grid-cols-2 gap-3">
-        <Field label="标签" hint="逗号分隔，掘金 / CSDN 发布必填">
+        <Field label="标签" hint="逗号分隔，掘金 / CSDN / 思否 / 51CTO 发布必填，知乎用作话题">
           <input className="input" value={doc.meta.tags} onChange={set('tags')} placeholder="JavaScript, 前端" />
         </Field>
-        <Field label="分类" hint="掘金分类，如 前端 / 后端">
+        <Field label="分类" hint="掘金 / B站 / 开源中国 / 51CTO 的分类名">
           <input className="input" value={doc.meta.category} onChange={set('category')} placeholder="后端" />
         </Field>
       </div>
       <Field label="摘要" hint="掘金要求 50 字以上，留空则从正文截取">
         <textarea className="input h-16 resize-none" value={doc.meta.summary} onChange={set('summary')} />
       </Field>
-      <Field label="封面图" hint="图片 URL 或本地相对路径">
+      <Field label="封面图" hint="URL 或本地路径，微博 / 百家号发布必填（可用正文图片）">
         <input className="input" value={doc.meta.cover} onChange={set('cover')} />
       </Field>
       {doc.missingImages.length > 0 && (

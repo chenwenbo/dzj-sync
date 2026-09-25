@@ -13,6 +13,8 @@ const logger = createLogger('Douban')
 interface DoubanFormData {
   note_id: string
   ck: string
+  /** 编辑页表单的提交 action（创建页为 new），发布时需要 */
+  action?: string
 }
 
 interface DoubanPostParams {
@@ -27,7 +29,7 @@ export class DoubanAdapter extends CodeAdapter {
     name: '豆瓣',
     icon: 'https://www.douban.com/favicon.ico',
     homepage: 'https://www.douban.com/note/create',
-    capabilities: ['article', 'draft', 'image_upload'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload', 'tags'],
   }
 
   /** 预处理配置: 豆瓣使用 Markdown 格式 (转换为 Draft.js) */
@@ -79,9 +81,12 @@ export class DoubanAdapter extends CodeAdapter {
 
       this.username = userNameMatch[1]
       this.avatar = userAvatarMatch ? userAvatarMatch[1] : ''
+      const actionMatch = html.match(/name="action"\s+value="([^"]+)"/)
+        || postParamsMatch?.[1].match(/['"]?action['"]?\s*:\s*['"]([^'"]+)['"]/)
       this.formData = {
         note_id: noteIdMatch[1],
         ck: ckMatch[1],
+        action: actionMatch ? actionMatch[1] : undefined,
       }
 
       // 解析 _POST_PARAMS 获取 upload_auth_token
@@ -183,14 +188,87 @@ export class DoubanAdapter extends CodeAdapter {
       // 豆瓣草稿只能在 /note/create 页面查看
       const draftUrl = 'https://www.douban.com/note/create'
 
-      return this.createResult(true, {
-        postId: this.formData!.note_id,
-        postUrl: draftUrl,
-        draftOnly: true,
-      })
+      return this.finishWithPublish({ postId: this.formData!.note_id, postUrl: draftUrl }, options, () =>
+        this.publishNote(article, draftContent)
+      )
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  /**
+   * 发布日记
+   *
+   * POST https://www.douban.com/j/note/publish（与 /j/note/autosave 字段相同，外加表单的 action，
+   * 创建页为 new），发布的就是创建页预分配的 note_id。
+   * 成功返回 { r: 0, url }；r 非 0 表示失败。公开地址为 https://www.douban.com/note/{note_id}/
+   * 可见范围固定为所有人可见（note_privacy=P）；frontmatter tags 作为作者标签（空格分隔）。
+   */
+  private async publishNote(
+    article: Article,
+    draftContent: string
+  ): Promise<{ postId: string; postUrl: string }> {
+    const form = this.formData!
+    const noteId = form.note_id
+
+    if (Array.from(article.title).length > 100) {
+      throw new Error('豆瓣日记标题不能超过 100 字，请缩短标题')
+    }
+
+    const response = await this.runtime.fetch('https://www.douban.com/j/note/publish', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      body: new URLSearchParams({
+        is_rich: '1',
+        note_id: noteId,
+        note_title: article.title,
+        note_text: draftContent,
+        introduction: '',
+        note_privacy: 'P',
+        cannot_reply: '',
+        author_tags: (article.tags || []).join(' '),
+        accept_donation: '',
+        donation_notice: '',
+        is_original: '',
+        ck: form.ck,
+        action: form.action || 'new',
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}，请打开豆瓣草稿检查是否已发布`)
+    }
+
+    const text = await response.text()
+    let res: { r?: number | boolean; url?: string; err?: string; message?: string; msg?: string }
+    try {
+      res = JSON.parse(text)
+    } catch {
+      throw new Error('发布响应无法解析，可能需要验证码，请打开豆瓣草稿手动发布')
+    }
+    logger.debug('Publish response:', res)
+
+    if (res.r !== 0 && res.r !== false) {
+      throw new Error(res.message || res.err || res.msg || `发布失败 (r=${res.r ?? '缺失'})`)
+    }
+
+    // 预分配的 note_id 已被使用，下次同步需重新读取创建页
+    this.formData = null
+
+    let postUrl = `https://www.douban.com/note/${noteId}/`
+    if (res.url) {
+      try {
+        postUrl = new URL(res.url, 'https://www.douban.com/note/create').href
+      } catch {
+        // 保留默认地址
+      }
+    }
+
+    return { postId: noteId, postUrl }
   }
 
   /**

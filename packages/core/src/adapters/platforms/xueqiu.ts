@@ -22,7 +22,7 @@ export class XueqiuAdapter extends CodeAdapter {
     name: '雪球',
     icon: 'https://xqdoc.imedao.com/17aebcfb84a145d33fc18679.ico',
     homepage: 'https://mp.xueqiu.com/writeV2',
-    capabilities: ['article', 'draft', 'image_upload'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload', 'cover'],
   }
 
   /** 预处理配置: 雪球使用 Markdown 格式 */
@@ -206,14 +206,91 @@ export class XueqiuAdapter extends CodeAdapter {
       const postId = res.id
       const draftUrl = `https://mp.xueqiu.com/write/draft/${postId}`
 
-      return this.createResult(true, {
-        postId: String(postId),
-        postUrl: draftUrl,
-        draftOnly: true,
-      })
+      return this.finishWithPublish({ postId: String(postId), postUrl: draftUrl }, options, () =>
+        this.publishLongText(String(postId), article, content)
+      )
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  // ============ 直接发布 ============
+
+  /**
+   * 直接发布长文（草稿已保存后调用）
+   *
+   * 雪球发帖接口需要一次性 session_token（公开逆向资料，xueqiu.com 与 mp.xueqiu.com/xq/ 代理路径一致，
+   * 草稿 /xq/statuses/draft/save.json、图片 /xq/photo/upload.json 同理）：
+   *   1. GET  /xq/provider/session/token.json?api_path=/statuses/update.json → { session_token }
+   *   2. POST /xq/statuses/update.json（x-www-form-urlencoded）
+   *      title、status(HTML 正文)、cover_pic、show_cover_pic、original、session_token ...
+   *      成功返回帖子对象 { id, user_id, ... }，失败返回 { error_description, error_code }
+   *   公开链接：https://xueqiu.com/{user_id}/{id}
+   *
+   * 默认值：
+   * - 封面可选：frontmatter cover 存在时上传并展示（show_cover_pic=1），否则不设封面
+   * - 不声明原创（original=0、original_declare=0），公开可见（is_private=false）
+   * - draft_id 指向刚保存的草稿，发布后由平台清理草稿
+   */
+  private async publishLongText(
+    draftId: string,
+    article: Article,
+    content: string
+  ): Promise<{ postId?: string; postUrl: string; message?: string }> {
+    let coverPic = ''
+    if (article.cover) {
+      coverPic = /^https?:\/\//.test(article.cover) && /xueqiu\.com|imedao\.com/.test(article.cover)
+        ? article.cover
+        : (await this.uploadImageByUrl(article.cover)).url
+    }
+
+    const tokenRes = await this.runtime.fetch(
+      `https://mp.xueqiu.com/xq/provider/session/token.json?api_path=${encodeURIComponent('/statuses/update.json')}&_=${Date.now()}`,
+      { method: 'GET', credentials: 'include' }
+    )
+    const tokenData = await tokenRes.json() as { session_token?: string; error_description?: string }
+    if (!tokenData.session_token) {
+      throw new Error(tokenData.error_description || '获取发布令牌失败，请重新登录雪球')
+    }
+
+    const response = await this.runtime.fetch('https://mp.xueqiu.com/xq/statuses/update.json', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        title: article.title,
+        status: content,
+        cover_pic: coverPic,
+        show_cover_pic: coverPic ? '1' : '0',
+        original: '0',
+        original_declare: '0',
+        right: '0',
+        legal_user_visible: 'false',
+        is_private: 'false',
+        draft_id: draftId,
+        session_token: tokenData.session_token,
+      }),
+    })
+
+    const res = await response.json() as {
+      id?: string | number
+      user_id?: string | number
+      user?: { id?: string | number }
+      error_description?: string
+      error_code?: string | number
+    }
+
+    logger.debug(' Publish response:', res)
+
+    if (!res.id) {
+      throw new Error(res.error_description || '发布失败')
+    }
+
+    // publish() 开头已确保登录，currentUser 一定存在
+    const userId = res.user_id ?? res.user?.id ?? this.currentUser!.id
+    return { postId: String(res.id), postUrl: `https://xueqiu.com/${userId}/${res.id}` }
   }
 
   /**

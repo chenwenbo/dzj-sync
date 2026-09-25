@@ -21,7 +21,7 @@ export class WeiboAdapter extends CodeAdapter {
     name: '微博',
     icon: 'https://weibo.com/favicon.ico',
     homepage: 'https://card.weibo.com/article/v5/editor',
-    capabilities: ['article', 'draft', 'image_upload', 'cover'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload', 'cover'],
   }
 
   /** 预处理配置: 微博使用 HTML 格式 */
@@ -217,14 +217,133 @@ export class WeiboAdapter extends CodeAdapter {
 
       const draftUrl = `https://card.weibo.com/article/v5/editor#/draft/${postId}`
 
-      return this.createResult(true, {
-        postId: postId,
-        postUrl: draftUrl,
-        draftOnly: true,
-      })
+      return this.finishWithPublish({ postId, postUrl: draftUrl }, options, () =>
+        this.publishDraft(config.uid, postId, article, content, coverUrl)
+      )
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  /**
+   * 发布已保存的头条文章草稿
+   *
+   * 与 v5 编辑器的「下一步 → 发布」一致：
+   * 1. POST /article/v5/aj/editor/draft/save，action=2（发布前保存），封面必填，
+   *    follow_to_read=0（关闭「仅粉丝阅读全文」，公开发布）
+   * 2. POST /article/v5/aj/editor/draft/publish，带草稿 id 与发布配文 text
+   * 成功回执 code 为 100000 / A00006；data.geetest 存在表示需要人机验证。
+   */
+  private async publishDraft(
+    uid: string,
+    postId: string,
+    article: Article,
+    content: string,
+    coverUrl: string
+  ): Promise<{ postUrl: string; message?: string }> {
+    // 发布必须有封面：优先 frontmatter cover，其次正文第一张已上传到微博图床的图片
+    const cover = coverUrl || content.match(/<img[^>]+src="(https?:\/\/[^"]*sinaimg\.cn[^"]*)"/i)?.[1] || ''
+    if (!cover) {
+      throw new Error('微博头条文章发布需要封面图，请在 frontmatter 中设置 cover，或在正文中插入图片')
+    }
+
+    const saveReqId = this.generateReqId()
+    const saveRes = await this.postWeiboForm<{ code: string | number; msg?: string; data?: { geetest?: unknown } }>(
+      `https://card.weibo.com/article/v5/aj/editor/draft/save?uid=${uid}&id=${postId}&_rid=${saveReqId}`,
+      saveReqId,
+      {
+        id: postId,
+        title: article.title,
+        subtitle: '',
+        type: '',
+        status: '0',
+        publish_at: '',
+        error_msg: '',
+        error_code: '0',
+        collection: '[]',
+        free_content: '',
+        content: content,
+        cover,
+        summary: article.summary || '',
+        writer: '',
+        extra: 'null',
+        is_word: '0',
+        article_recommend: '[]',
+        follow_to_read: '0',
+        isreward: '1',
+        pay_setting: '{"ispay":0,"isvclub":0}',
+        source: '0',
+        action: '2',
+        content_type: '0',
+        save: '1',
+      }
+    )
+    logger.debug('Pre-publish save response:', saveRes)
+    this.assertWeiboAck(saveRes, '发布前保存失败')
+
+    const publishReqId = this.generateReqId()
+    const publishRes = await this.postWeiboForm<{
+      code: string | number
+      msg?: string
+      data?: { geetest?: unknown; url?: string; mid?: string | number }
+    }>(
+      `https://card.weibo.com/article/v5/aj/editor/draft/publish?uid=${uid}&id=${postId}&_rid=${publishReqId}`,
+      publishReqId,
+      {
+        id: postId,
+        text: `发布了头条文章：《${article.title}》`,
+        rank: '0',
+        follow_to_read: '0',
+        follow_official: '0',
+        sync_wb: '0',
+        is_original: '0',
+        mpkey: '0',
+        time: '',
+        timestamp: '',
+      }
+    )
+    logger.debug('Publish response:', publishRes)
+    this.assertWeiboAck(publishRes, '发布失败')
+
+    // 发布回执不保证带文章链接：有 url / mid 则用之，否则指向个人主页的文章列表
+    const data = publishRes.data || {}
+    if (typeof data.url === 'string' && /^https?:\/\//.test(data.url)) {
+      return { postUrl: data.url }
+    }
+    if (data.mid) {
+      return { postUrl: `https://weibo.com/${uid}/${data.mid}` }
+    }
+    return {
+      postUrl: `https://weibo.com/u/${uid}?tabtype=article`,
+      message: '已发布，微博未返回文章链接，请在个人主页的「文章」栏查看',
+    }
+  }
+
+  private async postWeiboForm<T>(url: string, reqId: string, data: Record<string, string>): Promise<T> {
+    const response = await this.runtime.fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'accept': 'application/json, text/plain, */*',
+        'SN-REQID': reqId,
+      },
+      body: new URLSearchParams(data),
+    })
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+    return await response.json() as T
+  }
+
+  private assertWeiboAck(res: { code: string | number; msg?: string; data?: { geetest?: unknown } }, fallback: string): void {
+    if (res.data?.geetest) {
+      throw new Error('微博要求人机验证，请在网页编辑器中手动发布')
+    }
+    const code = String(res.code)
+    if (code !== '100000' && code !== 'A00006') {
+      throw new Error(res.msg || `${fallback} (错误码: ${code})`)
+    }
   }
 
   private generateReqId(): string {

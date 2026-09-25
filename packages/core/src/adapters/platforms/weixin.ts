@@ -50,7 +50,7 @@ export class WeixinAdapter extends CodeAdapter {
     name: '微信公众号',
     icon: 'https://mp.weixin.qq.com/favicon.ico',
     homepage: 'https://mp.weixin.qq.com',
-    capabilities: ['article', 'draft', 'image_upload'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload'],
   }
 
   /** 预处理配置: 微信公众号使用 HTML 格式，移除非微信域名链接，压缩标签间空白避免 ProseMirror 产生空节点 */
@@ -250,14 +250,107 @@ export class WeixinAdapter extends CodeAdapter {
 
       const draftUrl = `https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit&action=edit&type=77&appmsgid=${res.appMsgId}&token=${this.weixinMeta!.token}&lang=zh_CN`
 
-      return this.createResult(true, {
-        postId: res.appMsgId,
-        postUrl: draftUrl,
-        draftOnly: true,
+      const appMsgId = String(res.appMsgId)
+      return this.finishWithPublish({ postId: appMsgId, postUrl: draftUrl }, options, async () => {
+        await this.freePublish(appMsgId)
+        return {
+          postId: appMsgId,
+          postUrl: `https://mp.weixin.qq.com/cgi-bin/appmsgpublish?sub=list&begin=0&count=10&token=${this.weixinMeta!.token}&lang=zh_CN`,
+          message: '已发表（不推送给粉丝），可在公众号后台「发表记录」中查看',
+        }
       })
     }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
     }))
+  }
+
+  /**
+   * 发表草稿（不推送给粉丝，不占用群发次数）
+   *
+   * 与公众号后台「发表」一致：masssend + is_release_publish_page=1 + isFreePublish=true
+   * （参考 editor-app、socialWiz、wechat-mp-hack 的实现）。
+   * 账号开启「群发消息保护」时必须管理员扫码，无法自动发表。
+   */
+  private async freePublish(appMsgId: string): Promise<void> {
+    const token = this.weixinMeta!.token
+    const base = 'https://mp.weixin.qq.com'
+
+    // 1. 读取群发页信息：是否需要扫码、operation_seq
+    const pageRes = await this.runtime.fetch(
+      `${base}/cgi-bin/masssendpage?t=mass/send&token=${token}&lang=zh_CN&f=json`,
+      { method: 'GET', credentials: 'include' }
+    )
+    const pageText = await pageRes.text()
+    const pick = (re: RegExp) => pageText.match(re)?.[1]
+    const needScan = pick(/"need_scan_qrcode"\s*:\s*"?(\d+)/)
+    const protectStatus = Number(pick(/"protect_status"\s*:\s*"?(\d+)/) || 0)
+    if (needScan === '1' || (protectStatus & 2) === 2) {
+      throw new Error(
+        '公众号开启了「群发消息保护」，发表需要管理员扫码。可在公众号后台「设置与开发 → 安全中心 → 风险操作保护」中关闭后再使用直接发布'
+      )
+    }
+
+    let operationSeq = pick(/"?operation_seq"?\s*:\s*"?(\d+)/) || ''
+    if (!operationSeq) {
+      const ticketRes = await this.runtime.fetch(`${base}/misc/safeassistant?1=1&token=${token}&lang=zh_CN`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: new URLSearchParams({ token, lang: 'zh_CN', f: 'json', ajax: '1', random: String(Math.random()), action: 'get_ticket' }),
+      })
+      const ticket = await ticketRes.json() as { operation_seq?: string | number; base_resp?: { ret: number; err_msg?: string } }
+      if (ticket.base_resp && ticket.base_resp.ret !== 0) {
+        throw new Error(`获取发表凭证失败：${ticket.base_resp.err_msg || ticket.base_resp.ret}`)
+      }
+      operationSeq = ticket.operation_seq ? String(ticket.operation_seq) : ''
+    }
+
+    // 2. 发表
+    const reqId = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')
+    const body = new URLSearchParams({
+      token,
+      lang: 'zh_CN',
+      f: 'json',
+      ajax: '1',
+      random: String(Math.random()),
+      ack: '',
+      code: '',
+      reprint_info: JSON.stringify({ item_list: [] }),
+      reprint_confirm: '1',
+      list: '',
+      groupid: '',
+      sex: '0',
+      country: '',
+      province: '',
+      city: '',
+      send_time: '0',
+      type: '10',
+      share_page: '1',
+      synctxweibo: '0',
+      operation_seq: operationSeq,
+      req_id: reqId,
+      req_time: String(Date.now()),
+      sync_version: '1',
+      isFreePublish: 'true',
+      appmsgid: appMsgId,
+      isMulti: '0',
+      direct_send: '1',
+    })
+
+    const res = await this.runtime.fetch(
+      `${base}/cgi-bin/masssend?t=ajax-response&is_release_publish_page=1&token=${token}&lang=zh_CN`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body,
+      }
+    )
+    const data = await res.json() as { base_resp?: { ret: number; err_msg?: string } }
+    logger.debug('masssend response:', data)
+    if (data.base_resp?.ret !== 0) {
+      throw new Error(`发表失败：${data.base_resp?.err_msg || `ret=${data.base_resp?.ret ?? '未知'}`}`)
+    }
   }
 
   protected async uploadImageByUrl(src: string): Promise<ImageUploadResult> {

@@ -9,6 +9,8 @@
  */
 import { CodeAdapter, ImageUploadResult } from '../code-adapter'
 import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
+import type { PublishOptions } from '../types'
+import { buildSummary } from '../../lib'
 
 interface UploadSignResponse {
   code: number
@@ -44,7 +46,7 @@ export class Cto51Adapter extends CodeAdapter {
     name: '51CTO',
     icon: 'https://blog.51cto.com/favicon.ico',
     homepage: 'https://blog.51cto.com/blogger/publish',
-    capabilities: ['article', 'draft', 'image_upload'],
+    capabilities: ['article', 'draft', 'publish', 'image_upload'],
   }
 
   /** 预处理配置: 51CTO 使用 Markdown 格式 */
@@ -53,6 +55,7 @@ export class Cto51Adapter extends CodeAdapter {
   }
 
   private csrf: string | null = null
+  private username: string | null = null
 
   /** 51CTO API 需要的 Header 规则 */
   private readonly HEADER_RULES = [
@@ -85,6 +88,7 @@ export class Cto51Adapter extends CodeAdapter {
       const userLink = imgMatch[1]
       const avatar = imgMatch[2]
       const uid = userLink.split('/').filter(Boolean).pop() || ''
+      this.username = uid || null
 
       // 获取 csrf token
       const csrfMatch = html.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/)
@@ -217,9 +221,11 @@ export class Cto51Adapter extends CodeAdapter {
 
   /**
    * 发布文章
+   *
+   * 1. POST /blogger/draft 保存草稿（默认只做这一步）
+   * 2. draftOnly === false 时，再 POST /blogger/publish（check=1）把草稿发布出去
    */
-  async publish(article: Article): Promise<SyncResult> {
-    const now = Date.now()
+  async publish(article: Article, options?: PublishOptions): Promise<SyncResult> {
     return this.withHeaderRules(this.HEADER_RULES, async () => {
       // 确保已获取 csrf
       if (!this.csrf) {
@@ -279,19 +285,138 @@ export class Cto51Adapter extends CodeAdapter {
         throw new Error(res.msg || '发布失败')
       }
 
-      return {
-        platform: this.meta.id,
-        success: true,
-        postId: String(res.data.did),
-        postUrl: `https://blog.51cto.com/blogger/draft/${res.data.did}`,
-        draftOnly: true,
-        timestamp: now,
-      }
-    }).catch((error) => ({
-      platform: this.meta.id,
-      success: false,
+      const draftId = String(res.data.did)
+      const draftUrl = `https://blog.51cto.com/blogger/draft/${draftId}`
+
+      return this.finishWithPublish({ postId: draftId, postUrl: draftUrl }, options, async () => {
+        return this.publishDraft(article, postData, draftId)
+      })
+    }).catch((error) => this.createResult(false, {
       error: (error as Error).message,
-      timestamp: now,
     }))
+  }
+
+  /**
+   * 从写文章页面解析分类列表和 51CTO 记住的默认分类
+   *
+   * - 分类项形如 <div class="select_item" value="8">Java</div>（ID 在 value 属性上）
+   * - 默认值来自页面内联脚本里的 submitForm（pid / cate_id，即上次使用的分类）
+   * 解析失败时返回空，交给 51CTO 服务端校验并返回错误信息。
+   */
+  private parsePublishPage(html: string): {
+    categories: Array<{ id: string; name: string }>
+    defaultPid: string
+    defaultCateId: string
+  } {
+    const categories: Array<{ id: string; name: string }> = []
+    const itemRe = /<([a-z]+)\b([^>]*\bclass="[^"]*\bselect_item\b[^"]*"[^>]*)>([\s\S]*?)<\/\1>/gi
+    let m: RegExpExecArray | null
+    while ((m = itemRe.exec(html))) {
+      const valueMatch = m[2].match(/\b(?:value|data-id)="(\d+)"/)
+      const name = m[3].replace(/<[^>]+>/g, '').trim()
+      if (valueMatch && name) categories.push({ id: valueMatch[1], name })
+    }
+
+    let defaultPid = ''
+    let defaultCateId = ''
+    const formMatch = html.match(/submitForm\s*=\s*\{([\s\S]*?)\}/)
+    if (formMatch) {
+      defaultPid = formMatch[1].match(/\bpid['"]?\s*:\s*['"]?(\d+)/)?.[1] || ''
+      defaultCateId = formMatch[1].match(/\bcate_id['"]?\s*:\s*['"]?(\d+)/)?.[1] || ''
+    }
+
+    return { categories, defaultPid, defaultCateId }
+  }
+
+  /**
+   * 发布草稿
+   *
+   * POST https://blog.51cto.com/blogger/publish（表单，X-Requested-With + _csrf）
+   * 字段与 /blogger/draft 相同，另加：did = 草稿 ID、tag = 逗号分隔的标签名、
+   * pid / cate_id = 分类、abstract = 摘要、check = 1（表示正式发布）
+   * - blog_type: '1' 博客（'0' 为动态）；原创默认
+   * 成功响应 { status: 1, msg: 'success', data: { blog_id, request } }
+   * 注意 data.did 是草稿 ID，文章链接需用 blog_id：https://blog.51cto.com/{username}/{blog_id}
+   * 参考：https://github.com/addozhang/omnipub/blob/main/extension/background/service-worker.js （51cto_directPublish）
+   */
+  private async publishDraft(
+    article: Article,
+    draftData: Record<string, string>,
+    draftId: string
+  ): Promise<{ postId: string; postUrl: string; message?: string }> {
+    // 51CTO 发布必须填写标签（最多 5 个）
+    const tags = (article.tags || []).map(t => t.trim()).filter(Boolean).slice(0, 5)
+    if (tags.length === 0) {
+      throw new Error('51CTO 发布文章必须填写标签，请在 frontmatter 中设置 tags')
+    }
+
+    // 重新读取写文章页：刷新 csrf，获取分类列表与默认分类
+    const pageResponse = await this.runtime.fetch('https://blog.51cto.com/blogger/publish', {
+      credentials: 'include',
+    })
+    const html = await pageResponse.text()
+    const csrfMatch = html.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/)
+    if (csrfMatch) this.csrf = csrfMatch[1]
+    const userLink = html.match(/<li class="more user">\s*<a[^>]*href="([^"]+)"/)?.[1]
+    if (userLink) this.username = userLink.split('/').filter(Boolean).pop() || this.username
+    const { categories, defaultPid, defaultCateId } = this.parsePublishPage(html)
+
+    // 分类：frontmatter category 与 51CTO 分类同名时使用，否则沿用 51CTO 记住的上次分类
+    const pid = defaultPid
+    let cateId = defaultCateId
+    let message: string | undefined
+    const wanted = article.category?.trim()
+    if (wanted) {
+      const hit = categories.find(c => c.name === wanted)
+      if (hit) {
+        cateId = hit.id
+      } else {
+        message = `51CTO 未找到分类「${wanted}」，已使用默认分类`
+      }
+    }
+    // 与编辑器行为一致：cate_id 为空时回退为 pid
+    if (!cateId) cateId = pid
+
+    const body: Record<string, string> = {
+      ...draftData,
+      pid,
+      cate_id: cateId,
+      tag: tags.join(','),
+      abstract: buildSummary(article, 200),
+      img_urls: '',
+      did: draftId,
+      check: '1',
+      _csrf: this.csrf || '',
+    }
+
+    const response = await this.runtime.fetch('https://blog.51cto.com/blogger/publish', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+      },
+      body: new URLSearchParams(body).toString(),
+    })
+
+    let res: { status?: number; msg?: string; data?: { blog_id?: string | number; request?: string } }
+    try {
+      res = await response.json()
+    } catch {
+      throw new Error(`发布接口返回异常（HTTP ${response.status}）`)
+    }
+
+    const blogId = res?.data?.blog_id
+    if (res?.status !== 1 || !blogId) {
+      // 页面上解析不到分类时交由服务端校验，失败时提示用户显式指定分类
+      const hint = cateId ? '' : '（未能确定分类，请在 frontmatter 的 category 中填写 51CTO 的分类名称）'
+      throw new Error((res?.msg || '发布失败') + hint)
+    }
+
+    const postUrl = this.username
+      ? `https://blog.51cto.com/${this.username}/${blogId}`
+      : (res.data?.request || `https://blog.51cto.com/blogger/success/${blogId}`)
+    return { postId: String(blogId), postUrl, message }
   }
 }

@@ -59,9 +59,13 @@ Local images (`![](./img/a.png)`) are uploaded automatically to each target plat
 
 | Direct publish | Draft only |
 |---|---|
-| juejin, csdn, zhihu, cnblogs, yuque, self-hosted WordPress / Typecho / MetaWeblog (ids shown by `platforms`) | weixin, weibo, bilibili, baijiahao, douban, sohu, xueqiu, woshipm, 51cto, imooc, oschina, segmentfault, eastmoney |
+| juejin, csdn, zhihu, cnblogs, yuque, weixin, weibo, bilibili, baijiahao, douban, xueqiu, segmentfault, oschina, 51cto, self-hosted WordPress / Typecho / MetaWeblog (ids shown by `platforms`) | sohu, woshipm, imooc, eastmoney |
 
-Publishing requirements: juejin needs ≥1 tag and a summary ≥50 characters; csdn needs ≥1 tag. Juejin/CSDN articles go through platform review after publishing.
+Publishing requirements:
+- juejin: ≥1 tag and a summary ≥50 characters; csdn, segmentfault, 51cto: ≥1 tag; zhihu: tags become topics (usually required)
+- weibo, baijiahao: need a cover (`cover` or an image in the article)
+- weixin: the account must turn off 「群发消息保护」, otherwise publishing needs an admin QR scan and the draft is kept
+- juejin, csdn, bilibili, baijiahao go through platform review after publishing
 
 ## Workflow
 

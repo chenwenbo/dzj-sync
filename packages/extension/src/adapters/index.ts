@@ -45,13 +45,14 @@ const ADAPTER_CLASSES: AdapterConstructor[] = [
   BilibiliAdapter,
   BaijiahaoAdapter,
   DoubanAdapter,
-  SohuAdapter,
   XueqiuAdapter,
-  WoshipmAdapter,
-  Cto51Adapter,
-  ImoocAdapter,
-  OschinaAdapter,
   SegmentfaultAdapter,
+  OschinaAdapter,
+  Cto51Adapter,
+  // 仅草稿
+  SohuAdapter,
+  WoshipmAdapter,
+  ImoocAdapter,
   EastmoneyAdapter,
 ]
 
